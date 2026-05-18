@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -103,8 +104,8 @@ class WorkshopScanner:
             title = HARDCODED_WORKSHOP_TITLES.get(workshop_id)
         if title is None:
             title = None
-            masterbundle_file = mod_path / "MasterBundle.dat"
-            if masterbundle_file.exists():
+            masterbundle_file = self._find_masterbundle(mod_path)
+            if masterbundle_file is not None:
                 try:
                     title_value = self._extract_title_from_masterbundle(masterbundle_file)
                     if title_value:
@@ -121,6 +122,17 @@ class WorkshopScanner:
             title=title,
             display_name=display_name,
         )
+
+    def _find_masterbundle(self, mod_path: Path, max_depth: int = 3) -> Optional[Path]:
+        base_depth = len(mod_path.parts)
+        for root, dirs, files in os.walk(mod_path):
+            depth = len(Path(root).parts) - base_depth
+            if depth > max_depth:
+                dirs[:] = []
+                continue
+            if "MasterBundle.dat" in files:
+                return Path(root) / "MasterBundle.dat"
+        return None
 
     def _extract_title_from_masterbundle(self, file_path: Path) -> Optional[str]:
         raw_text = file_path.read_text(encoding="utf-8", errors="replace")

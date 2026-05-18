@@ -283,7 +283,7 @@ class MainWindow(tk.Tk):
         self.mods = self.scanner.discover_workshop_mods(self.workshop_path)
         self.mods.sort(key=lambda mod: mod.title.lower())
         for mod in self.mods:
-            self.mods_tree.insert("", tk.END, iid=mod.workshop_id, values=("☑", mod.title, mod.workshop_id))
+            self.mods_tree.insert("", tk.END, iid=mod.workshop_id, values=("☐", mod.title, mod.workshop_id))
         self.status_label.config(text=f"Loaded {len(self.mods)} workshop mods. Select mods to patch.")
 
     def _update_start_button(self) -> None:
