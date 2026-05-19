@@ -8,6 +8,7 @@ from typing import Any, List
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
+import webbrowser
 
 from .models import WorkshopMod
 from .workshop import WorkshopScanner
@@ -17,7 +18,7 @@ from .worker import PatchWorker
 class MainWindow(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Unturned Compatibility Patch Generator")
+        self.title("Aidds - Automatic ID Deployment System")
         self.geometry("980x760")
         self.game_dir: Path | None = None
         self.workshop_path: Path | None = None
@@ -100,7 +101,9 @@ class MainWindow(tk.Tk):
         self.export_json_checkbox = ttk.Checkbutton(options_frame, text="Export JSON mapping", variable=self.export_json_var)
         self.dry_run_checkbox.grid(row=0, column=0, padx=(0, 20))
         self.export_csv_checkbox.grid(row=0, column=1, padx=(0, 20))
-        self.export_json_checkbox.grid(row=0, column=2)
+        self.export_json_checkbox.grid(row=0, column=2, padx=(0, 20))
+        self.rent_server_button = ttk.Button(options_frame, text="Rent a server", command=self.on_rent_server)
+        self.rent_server_button.grid(row=0, column=3)
 
         buttons_frame = ttk.Frame(frame)
         buttons_frame.pack(fill=tk.X, pady=(0, 10))
@@ -274,6 +277,9 @@ class MainWindow(tk.Tk):
             self.log_label.insert(0, path)
             self.log_label.config(state="readonly")
             self._update_start_button()
+
+    def on_rent_server(self) -> None:
+        webbrowser.open_new_tab("https://midnighthostingsolutions.com")
 
     def _load_workshop_mods(self) -> None:
         self.mods_tree.delete(*self.mods_tree.get_children())
