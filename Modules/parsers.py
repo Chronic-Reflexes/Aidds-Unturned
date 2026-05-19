@@ -169,30 +169,69 @@ class DatAssetScanner:
                     block.asset_type = value
         return block
 
-    def patch_match(self, match: AssetMatch, new_value: int) -> bool:
+    def patch_match(
+        self,
+        match: AssetMatch,
+        new_value: int,
+        make_override: bool = False,
+        bundle_override_path: Optional[str] = None,
+        bundle_override_master: str = "original.masterbundle",
+    ) -> Optional[Path]:
         block = match.asset_block
-        applied = False
         raw_text = block.file_path.read_text(encoding="utf-8-sig", errors="replace")
         lines = raw_text.splitlines(keepends=True)
-        for line_index in block.line_indices:
-            original_line = lines[line_index]
-            stripped = original_line.strip()
-            if stripped.startswith("//") or stripped.startswith("#"):
-                continue
-            id_match = ID_LINE_PATTERN.match(stripped)
-            if not id_match:
-                continue
-            current_id = int(id_match.group("value"))
-            if current_id != match.conflict.legacy_id:
-                continue
-            indent = id_match.group("indent") or ""
-            key = id_match.group("key")
-            suffix = id_match.group("suffix") or ""
-            lines[line_index] = f"{indent}{key} {new_value}{suffix}\n"
-            applied = True
-        if applied:
-            block.file_path.write_text("".join(lines), encoding="utf-8-sig")
-        return applied
+        applied = False
+        updated_lines: List[str] = []
+        for index, line in enumerate(lines):
+            stripped = line.strip()
+            if index in block.line_indices:
+                if stripped.startswith("//") or stripped.startswith("#"):
+                    updated_lines.append(line)
+                    continue
+                guid_match = GUID_LINE_PATTERN.match(stripped)
+                if guid_match:
+                    # remove GUID lines entirely for override patch content
+                    applied = True
+                    continue
+                id_match = ID_LINE_PATTERN.match(stripped)
+                if id_match:
+                    current_id = int(id_match.group("value"))
+                    if current_id == match.conflict.legacy_id:
+                        indent = id_match.group("indent") or ""
+                        key = id_match.group("key")
+                        suffix = id_match.group("suffix") or ""
+                        updated_lines.append(f"{indent}{key} {new_value}{suffix}\n")
+                        applied = True
+                        continue
+            updated_lines.append(line)
+
+        if not applied:
+            return None
+
+        if make_override and bundle_override_path:
+            override_lines = [
+                f"Master_Bundle_Override {bundle_override_master}\n",
+                f"Bundle_Override_Path {bundle_override_path}\n",
+            ]
+            inserted = False
+            result_lines: List[str] = []
+            for line in updated_lines:
+                stripped = line.strip()
+                if not inserted and stripped and not stripped.startswith("//") and not stripped.startswith("#"):
+                    result_lines.extend(override_lines)
+                    inserted = True
+                result_lines.append(line)
+            if not inserted:
+                result_lines.extend(override_lines)
+            updated_lines = result_lines
+
+        target_path = block.file_path
+        if make_override:
+            target_path.write_text("".join(updated_lines), encoding="utf-8-sig")
+            return target_path
+
+        target_path.write_text("".join(updated_lines), encoding="utf-8-sig")
+        return target_path
 
     def has_asset_with_id(self, file_path: Path, legacy_id: int) -> bool:
         with file_path.open("r", encoding="utf-8-sig", errors="replace") as handle:

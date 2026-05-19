@@ -261,7 +261,7 @@ def run_fixer(
         client_log = Path(selected) if selected else None
     if csv_path is None:
         selected = choose_file(
-            title="Select SPAWN Legacy ID Availability.csv",
+            title="Select ITEM.csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
             use_gui=use_gui,
         )
@@ -276,7 +276,7 @@ def run_fixer(
     if not client_log or not client_log.exists():
         raise FileNotFoundError("Client.log path is required and must exist.")
     if not csv_path or not csv_path.exists():
-        raise FileNotFoundError("SPAWN Legacy ID Availability.csv path is required and must exist.")
+        raise FileNotFoundError("ITEM.csv path is required and must exist.")
     if not workshop_dir or not workshop_dir.exists():
         raise FileNotFoundError("Workshop mods directory path is required and must exist.")
 

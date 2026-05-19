@@ -11,6 +11,8 @@ class IDManager:
         self.reserved_ids: Set[int] = set()
         self.reserve_reserved_ids = reserve_reserved_ids
         self.min_allocatable_id = min_allocatable_id
+        self.next_candidate = min_allocatable_id
+        self._used_id_list_mode = False
 
     def load_from_csv(self, csv_path: Path) -> None:
         with csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -21,9 +23,13 @@ class IDManager:
             if not reader.fieldnames:
                 raise ValueError("CSV file could not be parsed because headers were missing.")
             names = [name.lower() for name in reader.fieldnames if name]
+            self._used_id_list_mode = self._detect_used_id_list_csv(names)
             for row in reader:
                 self._load_csv_row(row, names)
         heapq.heapify(self.available_heap)
+
+    def _detect_used_id_list_csv(self, names: List[str]) -> bool:
+        return "legacy category" in names and "legacy id" in names
 
     def _detect_dialect(self, sample: str) -> csv.Dialect:
         try:
@@ -45,9 +51,9 @@ class IDManager:
             normalized = key.strip().lower()
             if "legacy" in normalized and legacy_id_str is None:
                 legacy_id_str = value.strip()
-            elif "used" in normalized and used_by is None:
+            elif not self._used_id_list_mode and "used" in normalized and used_by is None:
                 used_by = value.strip()
-            elif "reserved" in normalized and reserved is None:
+            elif not self._used_id_list_mode and "reserved" in normalized and reserved is None:
                 reserved = value.strip()
         if not legacy_id_str:
             return
@@ -55,10 +61,13 @@ class IDManager:
             legacy_id = int(legacy_id_str)
         except ValueError:
             return
-        if self._row_is_available(used_by, reserved):
-            self.available_heap.append(legacy_id)
+        if self._used_id_list_mode:
+            self.used_ids.add(legacy_id)
         else:
-            self.reserved_ids.add(legacy_id)
+            if self._row_is_available(used_by, reserved):
+                self.available_heap.append(legacy_id)
+            else:
+                self.reserved_ids.add(legacy_id)
 
     @staticmethod
     def _row_is_available(used_by: Optional[str], reserved: Optional[str]) -> bool:
@@ -102,11 +111,25 @@ class IDManager:
                 continue
             self.used_ids.add(candidate)
             return candidate
-        raise ValueError(
-            f"No available IDs remain in the pool at or above {self.min_allocatable_id}."
-        )
+        candidate = self.next_candidate
+        while True:
+            if candidate < self.min_allocatable_id:
+                candidate = self.min_allocatable_id
+            if candidate in self.used_ids or (self.reserve_reserved_ids and candidate in self.reserved_ids):
+                candidate += 1
+                continue
+            self.used_ids.add(candidate)
+            self.next_candidate = candidate + 1
+            return candidate
 
     def get_unused_available_ids(self) -> Iterator[int]:
+        if self._used_id_list_mode:
+            candidate = max(self.min_allocatable_id, self.next_candidate)
+            while candidate < max(self.used_ids, default=self.min_allocatable_id) + 1000:
+                if candidate not in self.used_ids and (not self.reserve_reserved_ids or candidate not in self.reserved_ids):
+                    yield candidate
+                candidate += 1
+            return
         for candidate in sorted(set(self.available_heap)):
             if candidate < self.min_allocatable_id:
                 continue
@@ -114,5 +137,8 @@ class IDManager:
                 yield candidate
 
     def summary(self) -> str:
-        available = len([x for x in set(self.available_heap) if x not in self.used_ids])
+        if self._used_id_list_mode:
+            available = "unknown"
+        else:
+            available = len([x for x in set(self.available_heap) if x not in self.used_ids])
         return f"Available IDs: {available}, Used IDs: {len(self.used_ids)}"

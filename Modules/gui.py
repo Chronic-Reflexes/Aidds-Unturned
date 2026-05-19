@@ -53,7 +53,7 @@ class MainWindow(tk.Tk):
         self.workshop_label = ttk.Entry(input_frame, state="readonly")
         self.workshop_label.grid(row=1, column=1, sticky=tk.EW, padx=5)
 
-        self.csv_button = ttk.Button(input_frame, text="Select SPAWN Legacy ID Availability.csv", command=self.on_select_csv)
+        self.csv_button = ttk.Button(input_frame, text="Select ITEM.csv", command=self.on_select_csv)
         self.csv_button.grid(row=2, column=0, sticky=tk.W, pady=5)
         self.csv_label = ttk.Entry(input_frame, state="readonly")
         self.csv_label.grid(row=2, column=1, sticky=tk.EW, padx=5)
@@ -182,22 +182,19 @@ class MainWindow(tk.Tk):
             / "AssetIDs"
             / "All Assets"
             / "Grouped by Legacy Category"
-            / "SPAWN Legacy ID Availability.csv"
+            / "ITEM.csv"
         )
         if csv_candidate.exists():
             self.csv_path = csv_candidate
             self._set_label(self.csv_label, self.csv_path)
         else:
             self.csv_path = None
-            self._set_label(self.csv_label, "<SPAWN Legacy ID Availability.csv not found>")
+            self._set_label(self.csv_label, "<ITEM.csv not found>")
             messagebox.showinfo(
                 "CSV Not Found",
-                "SPAWN Legacy ID Availability.csv was not found in the Unturned directory.\n\n"
-                "Please generate it from the Unturned main menu:\n"
-                "1. Click the Workshop button\n"
-                "2. Press F1 on your keyboard\n"
-                "3. Click \"Export Asset IDs\"\n"
-                "4. Re-run the program",
+                "ITEM.csv was not found in the Unturned directory.\n\n"
+                "Please export Unturned asset IDs and place ITEM.csv in the correct AssetIDs folder,\n"
+                "or select it manually using the Select ITEM.csv button.",
             )
 
         self._update_start_button()
@@ -254,7 +251,7 @@ class MainWindow(tk.Tk):
 
     def on_select_csv(self) -> None:
         path = filedialog.askopenfilename(
-            title="Select SPAWN Legacy ID Availability.csv",
+            title="Select ITEM.csv",
             filetypes=[("CSV Files", "*.csv"), ("All Files", "*")],
         )
         if path:

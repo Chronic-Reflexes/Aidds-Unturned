@@ -123,9 +123,42 @@ class PatchBuilder:
                     suffix += 1
             shutil.copytree(mod.path, destination)
             mod.patch_path = destination
+            mod.original_masterbundle_name = self._find_original_masterbundle_name(mod)
+            self._cleanup_patch_mod(mod)
             self._log(f"Copied {mod.display_name} to patch folder")
             self._emit_progress(index, len(self.selected_mods) + 5, f"Copied {mod.display_name}")
             self._update_workshop_json_title(mod)
+
+    def _cleanup_patch_mod(self, mod: WorkshopMod) -> None:
+        if not mod.patch_path or not mod.patch_path.exists():
+            return
+        delete_names = {"masterbundle.dat", "masterbundle.dat.manifest", "item.meta", "object.meta"}
+        for path in list(mod.patch_path.rglob("*")):
+            if not path.is_file():
+                continue
+            lower_name = path.name.lower()
+            if lower_name in delete_names or lower_name.endswith(".masterbundle") or lower_name.endswith(".masterbundle.manifest"):
+                try:
+                    path.unlink()
+                    self._log(f"Removed patch-unwanted file {path.relative_to(mod.patch_path)}")
+                except OSError:
+                    self._log(f"Warning: could not remove {path}")
+
+    def _get_bundle_override_path(self, asset_file: Path, mod_root: Path) -> str:
+        relative_dir = asset_file.relative_to(mod_root).parent
+        normalized = "/".join(relative_dir.parts)
+        return normalized
+
+    def _find_original_masterbundle_name(self, mod: WorkshopMod) -> Optional[str]:
+        if not mod.path.exists():
+            return None
+        candidates = [
+            path for path in mod.path.rglob("*.masterbundle") if path.is_file()
+        ]
+        if not candidates:
+            return None
+        candidates.sort(key=lambda path: (len(path.relative_to(mod.path).parts), path.name.lower()))
+        return candidates[0].name
 
     def _update_workshop_json_title(self, mod: WorkshopMod) -> None:
         if not mod.patch_path:
@@ -238,11 +271,20 @@ class PatchBuilder:
             f"Resolved {conflict.asset_name} ({conflict.guid}) from {conflict.legacy_id} to {new_id} in {assignment.file_path}"
         )
         if not self.dry_run:
-            patched = scanner.patch_match(match, new_id)
-            if not patched:
+            bundle_override_path = self._get_bundle_override_path(match.asset_block.file_path, mod.patch_path)
+            bundle_override_master = mod.original_masterbundle_name or "original.masterbundle"
+            patched_path = scanner.patch_match(
+                match,
+                new_id,
+                make_override=True,
+                bundle_override_path=bundle_override_path,
+                bundle_override_master=bundle_override_master,
+            )
+            if not patched_path:
                 self.report.add_error(f"Failed to patch {assignment.file_path} for ID {new_id}")
             else:
-                self._log(f"Patched {assignment.file_path}")
+                assignment.file_path = patched_path
+                self._log(f"Patched {patched_path}")
 
     def _write_reports(self) -> None:
         mapping_txt = self.output_root / f"mapping_{self.timestamp}.txt"
