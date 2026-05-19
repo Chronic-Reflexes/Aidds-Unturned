@@ -70,16 +70,23 @@ class PatchBuilder:
             if c.source_workshop_id in selected_ids or c.existing_owner_workshop_id in selected_ids
         ]
         self._log(f"Parsed {len(conflicts)} conflicts; {len(filtered_conflicts)} involve selected mods")
-        if not filtered_conflicts:
+        deduped_conflicts = self._deduplicate_conflicts(filtered_conflicts)
+        if not deduped_conflicts:
             self._log("No selected mod conflicts were found.")
-            if not self.dry_run and self.selected_mods:
-                self._prepare_patch_workspace()
             self._write_reports()
             return self.output_root, self.report
 
-        self._prepare_patch_workspace()
+        patch_mod_ids: Set[str] = set()
+        for conflict in deduped_conflicts:
+            if conflict.source_workshop_id in self.mod_map:
+                patch_mod_ids.add(conflict.source_workshop_id)
+            elif conflict.existing_owner_workshop_id in self.mod_map:
+                patch_mod_ids.add(conflict.existing_owner_workshop_id)
+
+        patch_mods = [self.mod_map[workshop_id] for workshop_id in sorted(patch_mod_ids)]
+        self._prepare_patch_workspace(patch_mods)
         self._load_id_pool()
-        self._process_conflicts(filtered_conflicts)
+        self._process_conflicts(deduped_conflicts)
         if not self.dry_run:
             self._log("Applying patches to copied workspace")
         else:
@@ -93,15 +100,16 @@ class PatchBuilder:
         parser = ClientLogParser()
         return parser.parse_conflicts(self.client_log_path)
 
-    def _prepare_patch_workspace(self) -> None:
+    def _prepare_patch_workspace(self, mods_to_copy: Optional[List[WorkshopMod]] = None) -> None:
         if self.dry_run:
             self._log("Skipping workspace copy in dry-run mode")
             for mod in self.selected_mods:
                 mod.patch_path = mod.path
             return
 
+        mods = mods_to_copy if mods_to_copy is not None else self.selected_mods
         self._log("Copying selected mods into temporary patch workspace")
-        for index, mod in enumerate(self.selected_mods, start=1):
+        for index, mod in enumerate(mods, start=1):
             folder_name = sanitize_folder_name(mod.title)
             patch_folder_name = f"{folder_name} Compatibility Patch ({mod.workshop_id})"
             destination = self.output_root / patch_folder_name
