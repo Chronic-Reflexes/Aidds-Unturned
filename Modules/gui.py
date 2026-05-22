@@ -164,6 +164,7 @@ class RecipeItemPicker:
         self.dropdown_frame: Optional[ttk.Frame] = None
         self.listbox: Optional[tk.Listbox] = None
         self.dropdown_values: List[str] = []
+        self._displayed_list_labels: List[str] = []
         self._marquee_after_id: Optional[str] = None
         self._marquee_resume_after_id: Optional[str] = None
         self._filter_after_id: Optional[str] = None
@@ -178,14 +179,27 @@ class RecipeItemPicker:
         query = self.entry.get().strip().lower()
         if self.selected_labels and self.entry.get() == self._display_value():
             query = ""
-        if not query:
-            return self.option_values
-        return [value for value in self.option_values if query in value.lower()]
+        selected = [label for label in self.selected_labels if label in self.option_values]
+        if query:
+            remaining = [
+                value
+                for value in self.option_values
+                if value not in selected and query in value.lower()
+            ]
+        else:
+            remaining = [
+                value
+                for value in self.option_values
+                if value not in selected
+            ]
+        return selected + remaining
 
     def _display_value(self) -> str:
         return "/".join(self.selected_labels)
 
     def _refresh_display(self) -> None:
+        if self.allow_multi_select and self.dropdown_frame and self.dropdown_frame.winfo_exists():
+            return
         self.var.set(self._display_value())
 
     def _on_sort(self, event: tk.Event) -> str:
@@ -250,7 +264,7 @@ class RecipeItemPicker:
             index = 0
         if index is None:
             return
-        label = self.listbox.get(index)
+        label = self._label_for_index(index)
         if label == NO_RESULTS_TEXT:
             return
         self.selected_labels = [label]
@@ -297,6 +311,11 @@ class RecipeItemPicker:
         self.entry.xview_moveto(0)
 
     def open_dropdown(self, focus_list: bool = False) -> None:
+        opening = not (self.dropdown_frame and self.dropdown_frame.winfo_exists())
+        if opening and self.allow_multi_select:
+            self._stop_marquee()
+            self.var.set("")
+            self.entry.xview_moveto(0)
         values = self._matching_options()
         if self.dropdown_frame and self.dropdown_frame.winfo_exists():
             self._populate(values)
@@ -336,12 +355,15 @@ class RecipeItemPicker:
         if not self.listbox:
             return
         self.dropdown_values = values
-        previous = self.listbox.get(tk.ACTIVE) if self.listbox.size() else ""
+        previous_index = self.listbox.index(tk.ACTIVE) if self.listbox.size() else -1
+        previous = self._label_for_index(previous_index) if previous_index >= 0 else ""
         self.listbox.delete(0, tk.END)
+        self._displayed_list_labels = []
         display_values = values[:MAX_DROPDOWN_RESULTS] or [NO_RESULTS_TEXT]
         for value in display_values:
-            self.listbox.insert(tk.END, value)
-            if self._show_internal_selection and value in self.selected_labels:
+            self._displayed_list_labels.append(value)
+            self.listbox.insert(tk.END, self._format_list_label(value))
+            if value in self.selected_labels:
                 self.listbox.selection_set(tk.END)
         if display_values[0] != NO_RESULTS_TEXT:
             active_index = display_values.index(previous) if self._active_index is not None and previous in display_values else 0
@@ -352,27 +374,41 @@ class RecipeItemPicker:
         else:
             self._active_index = None
 
+    def _format_list_label(self, label: str) -> str:
+        return label
+
+    def _label_for_index(self, index: int) -> str:
+        if 0 <= index < len(self._displayed_list_labels):
+            return self._displayed_list_labels[index]
+        if self.listbox and 0 <= index < self.listbox.size():
+            return self.listbox.get(index)
+        return ""
+
     def _on_list_click(self, event: tk.Event) -> str:
         if not self.listbox:
             return "break"
         index = self.listbox.nearest(event.y)
         if index < 0:
             return "break"
-        label = self.listbox.get(index)
+        label = self._label_for_index(index)
         if label == NO_RESULTS_TEXT:
             return "break"
         self._active_index = index
         self.listbox.activate(index)
         self._show_internal_selection = True
         shift_pressed = self.allow_multi_select and bool(event.state & 0x0001)
-        if shift_pressed:
-            if label in self.selected_labels:
-                self.selected_labels.remove(label)
-                self.listbox.selection_clear(index)
-            else:
-                self.selected_labels.append(label)
-                self.listbox.selection_set(index)
+        if self.allow_multi_select and label in self.selected_labels:
+            self.selected_labels.remove(label)
+            self.listbox.selection_clear(index)
+            self._populate(self._matching_options())
+        elif shift_pressed:
+            self.selected_labels.append(label)
+            self.listbox.selection_set(index)
             self._refresh_display()
+        elif self.allow_multi_select:
+            self.selected_labels = [label]
+            self._refresh_display()
+            self.close_dropdown(restore_focus=True)
         else:
             self.selected_labels = [label]
             self._refresh_display()
@@ -431,8 +467,10 @@ class RecipeItemPicker:
             self.dropdown_frame.destroy()
         self.dropdown_frame = None
         self.listbox = None
+        self._displayed_list_labels = []
         self._active_index = None
         self._show_internal_selection = True
+        self._refresh_display()
         if restore_focus:
             self.entry.focus_set()
 
@@ -666,7 +704,7 @@ class RecipeRow:
     def configure_recipe(
         self,
         name: str,
-        ingredient_labels: List[str],
+        ingredient_labels: List[Any],
         ingredient_amounts: List[int],
         tool_indices: List[int],
         output_label: str,
@@ -678,8 +716,9 @@ class RecipeRow:
         while len(self.ingredients) < len(ingredient_labels):
             self._add_ingredient()
         self._layout()
-        for index, label in enumerate(ingredient_labels):
-            self.ingredients[index].set_labels([label])
+        for index, label_group in enumerate(ingredient_labels):
+            labels = label_group if isinstance(label_group, list) else [label_group]
+            self.ingredients[index].set_labels([str(label) for label in labels])
             amount = ingredient_amounts[index] if index < len(ingredient_amounts) else 1
             self.ingredients[index].set_amount(amount)
             self.ingredients[index].set_tool(index in tool_indices)
@@ -973,6 +1012,21 @@ class MainWindow(tk.Tk):
         except Exception:
             return fallback or []
 
+    def _parse_recipe_label_groups(self, value: str) -> List[List[str]]:
+        parsed = self._parse_csv_json_list(value)
+        if not parsed:
+            return []
+        if all(isinstance(item, list) for item in parsed):
+            return [
+                [str(label) for label in group if str(label) in self.recipe_item_map]
+                for group in parsed
+            ]
+        return [
+            [str(label)]
+            for label in parsed
+            if str(label) in self.recipe_item_map
+        ]
+
     def _import_custom_recipes_from_csv(self, path: Path) -> int:
         import csv
 
@@ -981,14 +1035,11 @@ class MainWindow(tk.Tk):
         try:
             with path.open("r", encoding="utf-8-sig", newline="") as handle:
                 reader = csv.DictReader(handle)
+                grouped_records: Dict[Tuple[str, str, str, str, str, str, int], dict] = {}
                 for record in reader:
-                    ingredient_labels = [
-                        str(label)
-                        for label in self._parse_csv_json_list(record.get("IngredientLabels", ""))
-                        if str(label) in self.recipe_item_map
-                    ]
+                    ingredient_label_groups = self._parse_recipe_label_groups(record.get("IngredientLabels", ""))
                     output_label = (record.get("OutputLabel") or "").strip()
-                    if not ingredient_labels or output_label not in self.recipe_item_map:
+                    if not ingredient_label_groups or output_label not in self.recipe_item_map:
                         if record.get("CustomRecipeName") or record.get("IngredientLabels") or record.get("OutputLabel"):
                             skipped += 1
                         continue
@@ -1006,9 +1057,38 @@ class MainWindow(tk.Tk):
                     output_amount_text = (record.get("OutputAmount") or "1").strip()
                     output_amount = int(output_amount_text) if output_amount_text.isdigit() else 1
                     name = (record.get("CustomRecipeName") or record.get("Name") or f"ImportedRecipe{len(self.recipe_rows) + 1}").strip()
-
                     description = (record.get("Description") or "").strip()
 
+                    group_key = (
+                        name,
+                        output_label,
+                        str(output_amount),
+                        description,
+                        json.dumps(ingredient_amounts),
+                        json.dumps(tool_indices),
+                        len(ingredient_label_groups),
+                    )
+                    grouped = grouped_records.get(group_key)
+                    if grouped is None:
+                        grouped_records[group_key] = {
+                            "name": name,
+                            "ingredient_label_groups": [list(group) for group in ingredient_label_groups],
+                            "ingredient_amounts": ingredient_amounts,
+                            "tool_indices": tool_indices,
+                            "output_label": output_label,
+                            "output_amount": output_amount,
+                            "description": description,
+                        }
+                        continue
+
+                    for index, labels in enumerate(ingredient_label_groups):
+                        if index >= len(grouped["ingredient_label_groups"]):
+                            grouped["ingredient_label_groups"].append([])
+                        for label in labels:
+                            if label not in grouped["ingredient_label_groups"][index]:
+                                grouped["ingredient_label_groups"][index].append(label)
+
+                for grouped in grouped_records.values():
                     row = RecipeRow(
                         self.recipe_inner_frame,
                         self.recipe_items,
@@ -1017,7 +1097,15 @@ class MainWindow(tk.Tk):
                         self._remove_recipe_row,
                     )
                     self.recipe_rows.append(row)
-                    row.configure_recipe(name, ingredient_labels, ingredient_amounts, tool_indices, output_label, output_amount, description)
+                    row.configure_recipe(
+                        grouped["name"],
+                        grouped["ingredient_label_groups"],
+                        grouped["ingredient_amounts"],
+                        grouped["tool_indices"],
+                        grouped["output_label"],
+                        grouped["output_amount"],
+                        grouped["description"],
+                    )
                     row.put_in_parent(len(self.recipe_rows) - 1)
                     imported += 1
             self._update_recipe_status()
@@ -1540,6 +1628,7 @@ class MainWindow(tk.Tk):
                         "tool_indices": tool_indices,
                         "ingredient_amounts": ingredient_amounts,
                         "ingredient_labels": list(label_combination),
+                        "ingredient_label_groups": ingredient_label_groups,
                         "output_amount": row.get_output_amount(),
                         "output_label": output_label,
                         "recipe_name": base_name,

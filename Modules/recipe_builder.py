@@ -158,7 +158,7 @@ class RecipeBuilder:
             "FilePath": str(dat_path),
             "CustomRecipeName": str(definition.get("recipe_name") or patch_name),
             "Description": str(definition.get("description") or ""),
-            "IngredientLabels": json.dumps(definition.get("ingredient_labels", [])),
+            "IngredientLabels": json.dumps(definition.get("ingredient_label_groups") or definition.get("ingredient_labels", [])),
             "IngredientAmounts": json.dumps(definition.get("ingredient_amounts", [])),
             "ToolIndices": json.dumps(definition.get("tool_indices", [])),
             "OutputLabel": str(definition.get("output_label") or ""),
