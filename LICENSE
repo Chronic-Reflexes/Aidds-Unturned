@@ -1,0 +1,34 @@
+Copyright (c) 2026 Chronic-Reflexes All rights reserved.
+
+PREAMBLE
+This license governs the use of the software tools provided in this repository. 
+The software is provided with "visible source" to allow community engagement, 
+forking, and personal use, while protecting the Developer's brand and hosting service.
+
+1. PERMITTED USES
+You are permitted to:
+* View and fork this repository on GitHub.
+* Run and use the software for personal or internal business operations.
+
+2. MANDATORY BRANDING PROTECTION (THE "NO-REMOVAL" CLAUSE)
+As a strict condition of this license, you MUST retain all original attribution, 
+branding, logos, copyright notices, and hyperlinks to Midnight Hosting Solutions
+exactly as they appear in the original source code and user interface. 
+You are strictly prohibited from modifying, hiding, obscuring, or removing 
+any elements that link users back to the Developer's hosting service.
+
+3. RESTRICTIONS ON MODIFICATION AND REDISTRIBUTION
+* You may modify the code for personal or internal use, provided such 
+  modifications do not violate Section 2.
+* You may not redistribute, sub-license, or sell modified versions of this 
+  software that have the original branding or links removed.
+
+4. TERMINATION
+Any breach of this license automatically terminates your right to use or fork 
+this software. The Developer reserves the right to issue DMCA takedown requests 
+for any forks or redistributions that violate Section 2.
+
+5. DISCLAIMER OF WARRANTY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR 
+IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY 
+CLAIM, DAMAGES OR OTHER LIABILITY.

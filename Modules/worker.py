@@ -17,6 +17,7 @@ class PatchWorker(threading.Thread):
         dry_run: bool = False,
         export_csv: bool = False,
         export_json: bool = False,
+        game_root: Optional[Path] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
         log_callback: Optional[Callable[[str], None]] = None,
         finished_callback: Optional[Callable[[bool, str, object], None]] = None,
@@ -31,6 +32,7 @@ class PatchWorker(threading.Thread):
         self.dry_run = dry_run
         self.export_csv = export_csv
         self.export_json = export_json
+        self.game_root = game_root
         self.progress_callback = progress_callback
         self.log_callback = log_callback
         self.finished_callback = finished_callback
@@ -47,6 +49,7 @@ class PatchWorker(threading.Thread):
                 dry_run=self.dry_run,
                 export_csv=self.export_csv,
                 export_json=self.export_json,
+                game_root=self.game_root,
                 log_callback=self.log_callback,
                 progress_callback=self.progress_callback,
             )

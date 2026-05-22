@@ -30,18 +30,25 @@ class PatchBuilder:
         dry_run: bool = False,
         export_csv: bool = False,
         export_json: bool = False,
+        game_root: Optional[Path] = None,
         log_callback: Optional[Callable[[str], None]] = None,
         progress_callback: Optional[Callable[[int, int, str], None]] = None,
     ):
         self.workshop_root = workshop_root
         self.client_log_path = client_log_path
         self.csv_path = csv_path
-        self.selected_mods = selected_mods
+        self.log_callback = log_callback
+        self.progress_callback = progress_callback
+        self.selected_mods = []
+        for mod in selected_mods:
+            if getattr(mod, "is_virtual", False) or not mod.path or not mod.path.exists():
+                if log_callback:
+                    log_callback(f"Skipping non-patchable source {mod.display_name}")
+                continue
+            self.selected_mods.append(mod)
         self.dry_run = dry_run
         self.export_csv = export_csv
         self.export_json = export_json
-        self.log_callback = log_callback
-        self.progress_callback = progress_callback
 
         self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.base_output_root = output_root or Path.cwd()
@@ -49,12 +56,15 @@ class PatchBuilder:
         if self.dry_run:
             self.output_root = self.base_output_root / f"unturned_patch_dryrun_{self.timestamp}"
         self.output_root.mkdir(parents=True, exist_ok=True)
+        self.patch_root = self.output_root / "CompatibilityPatch"
+        self.patch_root.mkdir(parents=True, exist_ok=True)
 
         self.log_file = self.output_root / f"fix_unturned_ids_{self.timestamp}.log"
         self.logger = configure_logger(self.log_file, verbose=True)
         self.report_generator = ReportGenerator(self.output_root)
         self.report = FixReport()
         self.id_manager = IDManager(min_allocatable_id=3000)
+        self.game_root = game_root
         self.mod_map: Dict[str, WorkshopMod] = {mod.workshop_id: mod for mod in self.selected_mods}
         self.assignment_map: Dict[Tuple[str, str, int], AssignedID] = {}
 
@@ -74,7 +84,7 @@ class PatchBuilder:
         if not deduped_conflicts:
             self._log("No selected mod conflicts were found.")
             self._write_reports()
-            return self.output_root, self.report
+            return self.patch_root, self.report
 
         patch_mod_ids: Set[str] = set()
         for conflict in deduped_conflicts:
@@ -94,7 +104,7 @@ class PatchBuilder:
         self._write_reports()
         self._emit_progress(100, 100, "Completed")
         self._log("Compatibility patch build completed")
-        return self.output_root, self.report
+        return self.patch_root, self.report
 
     def _parse_conflicts(self) -> List[Conflict]:
         parser = ClientLogParser()
@@ -108,15 +118,14 @@ class PatchBuilder:
             return
 
         mods = mods_to_copy if mods_to_copy is not None else self.selected_mods
-        self._log("Copying selected mods into temporary patch workspace")
+        self._log("Copying selected mods into single compatibility patch workspace")
         for index, mod in enumerate(mods, start=1):
             folder_name = sanitize_folder_name(mod.title)
-            patch_folder_name = f"{folder_name} Compatibility Patch ({mod.workshop_id})"
-            destination = self.output_root / patch_folder_name
+            destination = self.patch_root / folder_name
             if destination.exists():
                 suffix = 1
                 while True:
-                    alternate = self.output_root / f"{patch_folder_name} ({suffix})"
+                    alternate = self.patch_root / f"{folder_name} ({suffix})"
                     if not alternate.exists():
                         destination = alternate
                         break
@@ -125,7 +134,7 @@ class PatchBuilder:
             mod.patch_path = destination
             mod.original_masterbundle_name = self._find_original_masterbundle_name(mod)
             self._cleanup_patch_mod(mod)
-            self._log(f"Copied {mod.display_name} to patch folder")
+            self._log(f"Copied {mod.display_name} to patch workspace")
             self._emit_progress(index, len(self.selected_mods) + 5, f"Copied {mod.display_name}")
             self._update_workshop_json_title(mod)
 
@@ -187,9 +196,13 @@ class PatchBuilder:
         self._log(self.id_manager.summary())
 
     def _collect_existing_ids(self) -> Set[int]:
+        ids: Set[int] = set()
         scanner = DatAssetScanner(self.workshop_root)
-        ids = scanner.collect_used_ids()
-        self._log(f"Collected {len(ids)} existing IDs from workshop library")
+        ids.update(scanner.collect_used_ids())
+        if self.game_root and self.game_root.exists():
+            scanner = DatAssetScanner(self.game_root)
+            ids.update(scanner.collect_used_ids())
+        self._log(f"Collected {len(ids)} existing IDs from workshop and game content")
         return ids
 
     def _process_conflicts(self, conflicts: List[Conflict]) -> None:

@@ -6,12 +6,14 @@ from typing import List, Optional, Set
 @dataclass
 class WorkshopMod:
     workshop_id: str
-    path: Path
+    path: Optional[Path]
     title: str
     display_name: str
     selected: bool = True
     patch_path: Optional[Path] = None
     original_masterbundle_name: Optional[str] = None
+    is_virtual: bool = False
+    hidden: bool = False
 
 
 @dataclass

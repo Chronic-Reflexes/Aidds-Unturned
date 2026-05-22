@@ -1,18 +1,474 @@
 import os
+import json
+import re
 import sys
 import threading
+from itertools import product
 from pathlib import Path
 from queue import Queue, Empty
-from typing import Any, List
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 from tkinter.scrolledtext import ScrolledText
 import webbrowser
 
+HIDDEN_BUNDLE_NAMES = {
+    "water",
+    "vests",
+    "tools",
+    "throwables",
+    "tacticals",
+    "supplies",
+    "structures",
+    "sights",
+    "shirts",
+    "refills",
+    "pbs",
+    "pants",
+    "optics",
+    "melee",
+    "medical",
+    "maps",
+    "magizines",
+    "keys",
+    "hats",
+    "halloween2024",
+    "guns",
+    "growers",
+    "glasses",
+    "grips",
+    "fuels",
+    "frost",
+    "food",
+    "fishers",
+    "filters",
+    "detonators",
+    "combocrate 2024",
+    "clouds boxes",
+    "barricades",
+    "barrels",
+    "arrest starts",
+    "arrest ends",
+    "backpacks",
+    "blueprints",
+    "boxes",
+    "clouds",
+    "magazines",
+    "masks",
+    "outfits",
+}
+HIDDEN_BUNDLE_KEYS = {
+    re.sub(r"[^a-z0-9]+", "", name)
+    for name in HIDDEN_BUNDLE_NAMES
+}
+HIDDEN_BUNDLE_KEYS.add("combocrate2024")
+
+UNCHECKED = "[ ]"
+CHECKED = "[x]"
+UI_SETTINGS_FILE = Path(__file__).resolve().parent / "ui_settings.json"
+
 from .models import WorkshopMod
+from .parsers import DatAssetScanner
 from .workshop import WorkshopScanner
 from .worker import PatchWorker
+from .recipe_builder import RecipeBuilder
+
+
+class RecipeItemPicker:
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        option_values: List[str],
+        on_update: Callable[[], None],
+        width: int = 28,
+        allow_multi_select: bool = True,
+    ):
+        self.parent = parent
+        self.option_values = option_values
+        self.on_update = on_update
+        self.allow_multi_select = allow_multi_select
+        self.selected_labels: List[str] = []
+        self.var = tk.StringVar()
+        self.border_frame = tk.Frame(parent, background="black", borderwidth=0)
+        self.frame = ttk.Frame(self.border_frame)
+        self.frame.grid(row=0, column=0, sticky="ew", padx=1, pady=1)
+        self.border_frame.columnconfigure(0, weight=1)
+        self.entry = ttk.Entry(self.frame, textvariable=self.var, width=width)
+        self.entry.grid(row=0, column=0, sticky="ew")
+        self.frame.columnconfigure(0, weight=1)
+        self.entry.bind("<Return>", self._on_sort)
+        self.entry.bind("<Button-1>", self._on_click)
+        self.entry.bind("<KeyRelease>", self._on_key_release)
+        self.entry.bind("<Down>", self._on_arrow_down)
+        self.entry.bind("<Up>", self._on_arrow_up)
+        self.entry.bind("<Enter>", self._start_marquee)
+        self.entry.bind("<Leave>", self._stop_marquee)
+        self.dropdown_frame: Optional[ttk.Frame] = None
+        self.listbox: Optional[tk.Listbox] = None
+        self.dropdown_values: List[str] = []
+        self._marquee_after_id: Optional[str] = None
+        self._marquee_resume_after_id: Optional[str] = None
+        self._marquee_position = 0.0
+        self._active_index: Optional[int] = None
+        self._show_internal_selection = True
+
+    def grid(self, **kwargs: Any) -> None:
+        self.border_frame.grid(**kwargs)
+
+    def _matching_options(self) -> List[str]:
+        query = self.entry.get().strip().lower()
+        if self.selected_labels and self.entry.get() == self._display_value():
+            query = ""
+        if not query:
+            return self.option_values
+        return sorted(
+            self.option_values,
+            key=lambda value: (query not in value.lower(), value.lower()),
+        )
+
+    def _display_value(self) -> str:
+        return "/".join(self.selected_labels)
+
+    def _refresh_display(self) -> None:
+        self.var.set(self._display_value())
+
+    def _on_sort(self, event: tk.Event) -> str:
+        self.open_dropdown(focus_list=False)
+        self._commit_highlighted_selection()
+        return "break"
+
+    def _on_click(self, event: tk.Event) -> None:
+        self.entry.after_idle(lambda: self.open_dropdown(focus_list=False))
+
+    def _on_key_release(self, event: tk.Event) -> None:
+        if event.keysym in {"Return", "Escape", "Shift_L", "Shift_R", "Control_L", "Control_R"}:
+            return
+        self._pause_marquee_for_typing()
+        self._show_internal_selection = False
+        self._active_index = None
+        if self.dropdown_frame and self.dropdown_frame.winfo_exists():
+            self._populate(self._matching_options())
+        else:
+            self.open_dropdown(focus_list=False)
+        self._active_index = None
+
+    def _on_arrow_down(self, event: tk.Event) -> str:
+        self.open_dropdown(focus_list=False)
+        self._move_highlight(1, start_at_first=True)
+        return "break"
+
+    def _on_arrow_up(self, event: tk.Event) -> str:
+        self.open_dropdown(focus_list=False)
+        self._move_highlight(-1)
+        return "break"
+
+    def _move_highlight(self, direction: int, start_at_first: bool = False) -> None:
+        if not self.listbox or self.listbox.size() == 0:
+            return
+        if self._active_index is None and start_at_first:
+            index = 0
+        else:
+            index = self._active_index if self._active_index is not None else (-1 if direction > 0 else 0)
+            index += direction
+        index = max(0, min(self.listbox.size() - 1, index))
+        self._active_index = index
+        self.listbox.activate(index)
+        self.listbox.see(index)
+
+    def _commit_highlighted_selection(self) -> None:
+        if not self.listbox:
+            return
+        index = self._active_index
+        if index is None and self.listbox.size() > 0:
+            index = 0
+        if index is None:
+            return
+        label = self.listbox.get(index)
+        self.selected_labels = [label]
+        self._show_internal_selection = True
+        self._refresh_display()
+        self.close_dropdown(restore_focus=True)
+        self.on_update()
+
+    def _pause_marquee_for_typing(self) -> None:
+        self._stop_marquee()
+        if self._marquee_resume_after_id is not None:
+            self.entry.after_cancel(self._marquee_resume_after_id)
+        self._marquee_resume_after_id = self.entry.after(2000, self._resume_marquee_after_typing)
+
+    def _resume_marquee_after_typing(self) -> None:
+        self._marquee_resume_after_id = None
+        if self.entry.winfo_containing(self.entry.winfo_pointerx(), self.entry.winfo_pointery()) == self.entry:
+            self._start_marquee(None)
+
+    def _start_marquee(self, event: Optional[tk.Event]) -> None:
+        if not self.selected_labels or self._marquee_after_id is not None:
+            return
+        self._marquee_position = 0.0
+        self._step_marquee()
+
+    def _step_marquee(self) -> None:
+        if not self.selected_labels:
+            self._marquee_after_id = None
+            return
+        self.entry.xview_moveto(self._marquee_position)
+        self._marquee_position += 0.025
+        if self._marquee_position > 1.0:
+            self._marquee_position = 0.0
+        self._marquee_after_id = self.entry.after(120, self._step_marquee)
+
+    def _stop_marquee(self, event: Optional[tk.Event] = None) -> None:
+        if self._marquee_after_id is not None:
+            self.entry.after_cancel(self._marquee_after_id)
+            self._marquee_after_id = None
+        if event is not None and self._marquee_resume_after_id is not None:
+            self.entry.after_cancel(self._marquee_resume_after_id)
+            self._marquee_resume_after_id = None
+        self._marquee_position = 0.0
+        self.entry.xview_moveto(0)
+
+    def open_dropdown(self, focus_list: bool = False) -> None:
+        values = self._matching_options()
+        if self.dropdown_frame and self.dropdown_frame.winfo_exists():
+            self._populate(values)
+            if focus_list and self.listbox:
+                self.listbox.focus_set()
+            return
+
+        self.dropdown_frame = tk.Frame(self.frame, background="black")
+        self.dropdown_frame.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self.dropdown_frame.columnconfigure(0, weight=1)
+
+        height = min(8, max(3, len(values)))
+        self.listbox = tk.Listbox(
+            self.dropdown_frame,
+            height=height,
+            selectmode=tk.MULTIPLE,
+            exportselection=False,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        scrollbar = ttk.Scrollbar(self.dropdown_frame, orient=tk.VERTICAL, command=self.listbox.yview)
+        self.listbox.configure(yscrollcommand=scrollbar.set)
+        self.listbox.grid(row=0, column=0, sticky="ew", padx=(1, 0), pady=1)
+        scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
+        self.listbox.bind("<ButtonRelease-1>", self._on_list_click)
+        self.listbox.bind("<Escape>", lambda _: self.close_dropdown(restore_focus=True))
+        self._populate(values)
+        if self.listbox.size() > 0 and self._active_index is None:
+            self.listbox.activate(0)
+        if focus_list:
+            self.listbox.focus_set()
+        else:
+            self.entry.focus_set()
+
+    def _populate(self, values: List[str]) -> None:
+        if not self.listbox:
+            return
+        self.dropdown_values = values
+        previous = self.listbox.get(tk.ACTIVE) if self.listbox.size() else ""
+        self.listbox.delete(0, tk.END)
+        for value in values:
+            self.listbox.insert(tk.END, value)
+            if self._show_internal_selection and value in self.selected_labels:
+                self.listbox.selection_set(tk.END)
+        if values:
+            active_index = values.index(previous) if self._active_index is not None and previous in values else 0
+            if self._active_index is not None:
+                self._active_index = active_index
+            self.listbox.activate(active_index)
+            self.listbox.see(active_index)
+        else:
+            self._active_index = None
+
+    def _on_list_click(self, event: tk.Event) -> str:
+        if not self.listbox:
+            return "break"
+        index = self.listbox.nearest(event.y)
+        if index < 0:
+            return "break"
+        label = self.listbox.get(index)
+        self._active_index = index
+        self.listbox.activate(index)
+        self._show_internal_selection = True
+        shift_pressed = self.allow_multi_select and bool(event.state & 0x0001)
+        if shift_pressed:
+            if label in self.selected_labels:
+                self.selected_labels.remove(label)
+            else:
+                self.selected_labels.append(label)
+            self._refresh_display()
+            self._populate(self.dropdown_values)
+        else:
+            self.selected_labels = [label]
+            self._refresh_display()
+            self.close_dropdown(restore_focus=True)
+        self.on_update()
+        return "break"
+
+    def close_dropdown(self, restore_focus: bool = False) -> None:
+        if self.dropdown_frame and self.dropdown_frame.winfo_exists():
+            self.dropdown_frame.destroy()
+        self.dropdown_frame = None
+        self.listbox = None
+        self._active_index = None
+        self._show_internal_selection = True
+        if restore_focus:
+            self.entry.focus_set()
+
+    def update_options(self, option_values: List[str]) -> None:
+        self.option_values = option_values
+        self.selected_labels = [label for label in self.selected_labels if label in option_values]
+        self._refresh_display()
+        if self.dropdown_frame and self.dropdown_frame.winfo_exists():
+            self._populate(self._matching_options())
+
+    def get_labels(self) -> List[str]:
+        typed = self.entry.get().strip()
+        if self.selected_labels:
+            return list(self.selected_labels)
+        if typed in self.option_values:
+            return [typed]
+        return []
+
+    def contains_widget(self, widget: tk.Widget) -> bool:
+        current: Optional[tk.Widget] = widget
+        while current is not None:
+            if current in {self.border_frame, self.frame, self.entry, self.dropdown_frame, self.listbox}:
+                return True
+            current = current.master
+        return False
+
+
+class IngredientWidget:
+    def __init__(self, parent: ttk.Frame, option_values: List[str], on_update: Callable[[], None], show_tool_checkbox: bool = True):
+        self.frame = ttk.Frame(parent)
+        self.option_values = option_values
+        self.tool_var = tk.BooleanVar(value=False)
+        self.picker = RecipeItemPicker(self.frame, option_values, on_update)
+        self.picker.grid(row=0, column=0, sticky="ew")
+        self.tool_check = None
+        if show_tool_checkbox:
+            self.tool_check = ttk.Checkbutton(self.frame, text="Is tool?", variable=self.tool_var, command=on_update)
+            self.tool_check.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.frame.columnconfigure(0, weight=1)
+
+    def update_options(self, option_values: List[str]) -> None:
+        self.option_values = option_values
+        self.picker.update_options(option_values)
+
+    def get_labels(self) -> List[str]:
+        return self.picker.get_labels()
+
+    def is_tool(self) -> bool:
+        return self.tool_var.get()
+
+
+class RecipeRow:
+    def __init__(
+        self,
+        parent: ttk.Frame,
+        option_values: List[str],
+        option_map: Dict[str, int],
+        on_update: Callable[[], None],
+    ):
+        self.parent = parent
+        self.option_values = option_values
+        self.option_map = option_map
+        self.on_update = on_update
+        self.frame = ttk.Frame(parent)
+        self.ingredients: List[IngredientWidget] = []
+        self.name_var = tk.StringVar()
+        self.name_entry = ttk.Entry(self.frame, textvariable=self.name_var, width=20)
+        self.name_entry.bind("<KeyRelease>", self._on_name_change)
+        self.result_picker = RecipeItemPicker(self.frame, option_values, self.on_update, allow_multi_select=False)
+        self.add_button = ttk.Button(self.frame, text="+", width=2, command=self.add_component, style="Green.TButton")
+        self.add_button.bind("<Button-3>", lambda _: self.remove_component())
+        self.equals_label = ttk.Label(self.frame, text="=")
+        self._add_ingredient()
+        self._layout()
+
+    def _on_name_change(self, event: tk.Event) -> None:
+        cleaned = re.sub(r"[^A-Za-z0-9_-]+", "_", self.name_var.get())
+        if cleaned != self.name_var.get():
+            self.name_var.set(cleaned)
+            self.name_entry.icursor(tk.END)
+        self.on_update()
+
+    def _add_ingredient(self) -> None:
+        show_tool_checkbox = len(self.ingredients) > 0
+        ingredient = IngredientWidget(self.frame, self.option_values, self.on_update, show_tool_checkbox=show_tool_checkbox)
+        self.ingredients.append(ingredient)
+
+    def add_component(self) -> None:
+        self._add_ingredient()
+        self._layout()
+        self.on_update()
+
+    def remove_component(self) -> None:
+        if len(self.ingredients) <= 1:
+            return
+        removed = self.ingredients.pop()
+        removed.frame.destroy()
+        self._layout()
+        self.on_update()
+
+    def _layout(self) -> None:
+        for child in self.frame.winfo_children():
+            child.grid_forget()
+
+        max_cols = 4
+        self.name_entry.grid(row=0, column=0, padx=(0, 4), pady=(0, 4), sticky="new")
+        self.frame.columnconfigure(0, weight=0)
+        for idx, ingredient in enumerate(self.ingredients):
+            row = idx // max_cols
+            col = (idx % max_cols) + 1
+            ingredient.frame.grid(row=row, column=col, padx=(0, 4), pady=(0, 4), sticky="nsew")
+            self.frame.columnconfigure(col, weight=1)
+
+        self.equals_label.grid(row=0, column=max_cols + 1, padx=(0, 4), sticky="nw")
+        self.result_picker.grid(row=0, column=max_cols + 2, padx=(0, 4), sticky="new")
+        self.frame.columnconfigure(max_cols + 2, weight=1)
+
+        next_index = len(self.ingredients)
+        last_row = next_index // max_cols
+        last_col = (next_index % max_cols) + 1
+        self.add_button.grid(row=last_row, column=last_col, padx=(0, 4), sticky="nw")
+
+    def update_options(self, option_values: List[str], option_map: Dict[str, int]) -> None:
+        self.option_values = option_values
+        self.option_map = option_map
+        for ingredient in self.ingredients:
+            ingredient.update_options(option_values)
+        self.result_picker.update_options(option_values)
+
+    def set_recipe_name(self, name: str) -> None:
+        self.name_var.set(name)
+
+    def get_recipe_name(self) -> str:
+        return self.name_var.get().strip()
+
+    def get_ingredient_label_groups(self) -> List[List[str]]:
+        return [labels for ingredient in self.ingredients if (labels := ingredient.get_labels())]
+
+    def get_output_label(self) -> str:
+        labels = self.result_picker.get_labels()
+        return labels[0] if labels else ""
+
+    def get_tool_indices(self) -> List[int]:
+        return [index for index, ingredient in enumerate(self.ingredients) if ingredient.is_tool()]
+
+    def put_in_parent(self, row: int) -> None:
+        self.frame.grid(row=row, column=0, sticky="ew", pady=4)
+        self.parent.columnconfigure(0, weight=1)
+
+    def close_dropdowns_except(self, widget: tk.Widget) -> None:
+        for ingredient in self.ingredients:
+            if not ingredient.picker.contains_widget(widget):
+                ingredient.picker.close_dropdown()
+        if not self.result_picker.contains_widget(widget):
+            self.result_picker.close_dropdown()
 
 
 class MainWindow(tk.Tk):
@@ -31,6 +487,10 @@ class MainWindow(tk.Tk):
         self.worker_queue: Queue = Queue()
         self.last_output_path: Path | None = None
         self.scanner = WorkshopScanner()
+        self._recipe_item_cache: Dict[str, List[Tuple[str, int]]] = {}
+        self._recipe_refresh_after_id: Optional[str] = None
+        self.ui_settings = self._load_ui_settings()
+        self._showing_recipe_reminder = False
 
         self._build_ui()
         self.after(200, self._poll_worker_queue)
@@ -39,7 +499,51 @@ class MainWindow(tk.Tk):
         frame = ttk.Frame(self, padding=10)
         frame.pack(fill=tk.BOTH, expand=True)
 
-        input_frame = ttk.Frame(frame)
+        style = ttk.Style(self)
+        style.configure("Green.TButton", foreground="#006400", background="#ccffcc")
+        style.configure("TNotebook", borderwidth=1)
+        style.configure(
+            "TNotebook.Tab",
+            padding=(18, 8),
+            borderwidth=1,
+            relief="solid",
+            bordercolor="black",
+            lightcolor="black",
+            darkcolor="black",
+        )
+        style.map("TNotebook.Tab", padding=[("selected", (20, 9))])
+
+        notebook_row = ttk.Frame(frame)
+        notebook_row.pack(fill=tk.BOTH, expand=True)
+        notebook_row.columnconfigure(0, weight=1)
+        notebook_row.rowconfigure(0, weight=1)
+
+        self.notebook = ttk.Notebook(notebook_row)
+        self.notebook.grid(row=0, column=0, sticky="nsew")
+        self.rent_server_button = ttk.Button(notebook_row, text="Rent a server", command=self.on_rent_server)
+        self.rent_server_button.grid(row=0, column=1, sticky="ne", padx=(8, 0), pady=(1, 0))
+
+        self.ids_tab = ttk.Frame(self.notebook)
+        self.recipes_tab = ttk.Frame(self.notebook)
+        self.notebook.add(self.ids_tab, text="IDs")
+        self.notebook.add(self.recipes_tab, text="Recipes")
+
+        self._build_ids_tab()
+        self._build_recipes_tab()
+        self.bind_all("<Button-1>", self._on_global_click, add="+")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
+
+        self.progress_bar = ttk.Progressbar(frame, mode="determinate")
+        self.progress_bar.pack(fill=tk.X, pady=(10, 10))
+
+        self.log_output = ScrolledText(frame, height=10, state="disabled")
+        self.log_output.pack(fill=tk.BOTH, expand=True)
+
+        self.status_label = ttk.Label(frame, text="Awaiting input selection...")
+        self.status_label.pack(fill=tk.X, pady=(5, 0))
+
+    def _build_ids_tab(self) -> None:
+        input_frame = ttk.Frame(self.ids_tab)
         input_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.game_button = ttk.Button(input_frame, text="Select Unturned Game Directory", command=self.on_select_game_directory)
@@ -71,7 +575,7 @@ class MainWindow(tk.Tk):
         input_frame.columnconfigure(1, weight=1)
         self._set_label(self.output_label, f"Default: {self.output_base}")
 
-        mods_frame = ttk.LabelFrame(frame, text="Workshop Mods")
+        mods_frame = ttk.LabelFrame(self.ids_tab, text="Workshop Mods")
         mods_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
 
         columns = ("selected", "title", "workshop_id")
@@ -90,7 +594,7 @@ class MainWindow(tk.Tk):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.mods_tree.configure(yscrollcommand=scrollbar.set)
 
-        options_frame = ttk.Frame(frame)
+        options_frame = ttk.Frame(self.ids_tab)
         options_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.dry_run_var = tk.BooleanVar(value=False)
@@ -102,10 +606,8 @@ class MainWindow(tk.Tk):
         self.dry_run_checkbox.grid(row=0, column=0, padx=(0, 20))
         self.export_csv_checkbox.grid(row=0, column=1, padx=(0, 20))
         self.export_json_checkbox.grid(row=0, column=2, padx=(0, 20))
-        self.rent_server_button = ttk.Button(options_frame, text="Rent a server", command=self.on_rent_server)
-        self.rent_server_button.grid(row=0, column=3)
 
-        buttons_frame = ttk.Frame(frame)
+        buttons_frame = ttk.Frame(self.ids_tab)
         buttons_frame.pack(fill=tk.X, pady=(0, 10))
 
         self.start_button = ttk.Button(buttons_frame, text="Start Patch Generation", command=self.on_start)
@@ -116,14 +618,116 @@ class MainWindow(tk.Tk):
         self.open_output_button.pack(side=tk.LEFT, padx=(10, 0))
         self.open_output_button.state(["disabled"])
 
-        self.progress_bar = ttk.Progressbar(frame, mode="determinate")
-        self.progress_bar.pack(fill=tk.X, pady=(0, 10))
+    def _build_recipes_tab(self) -> None:
+        self.recipe_rows: List[RecipeRow] = []
+        self.recipe_items: List[str] = []
+        self.recipe_item_map: Dict[str, int] = {}
 
-        self.log_output = ScrolledText(frame, height=14, state="disabled")
-        self.log_output.pack(fill=tk.BOTH, expand=True)
+        toolbar = ttk.Frame(self.recipes_tab)
+        toolbar.pack(fill=tk.X, pady=(0, 10))
 
-        self.status_label = ttk.Label(frame, text="Awaiting input selection...")
-        self.status_label.pack(fill=tk.X, pady=(5, 0))
+        self.add_recipe_button = ttk.Button(toolbar, text="Add Recipe", command=self.on_add_recipe)
+        self.add_recipe_button.pack(side=tk.LEFT)
+
+        self.generate_recipes_button = ttk.Button(toolbar, text="Generate Recipes", command=self.on_generate_recipes)
+        self.generate_recipes_button.pack(side=tk.LEFT, padx=(10, 0))
+
+        self.recipe_status_label = ttk.Label(toolbar, text="No recipes defined")
+        self.recipe_status_label.pack(side=tk.LEFT, padx=(20, 0))
+
+        recipe_frame = ttk.Frame(self.recipes_tab)
+        recipe_frame.pack(fill=tk.BOTH, expand=True)
+
+        self.recipe_canvas = tk.Canvas(recipe_frame, borderwidth=0, highlightthickness=0)
+        self.recipe_scrollbar = ttk.Scrollbar(recipe_frame, orient=tk.VERTICAL, command=self.recipe_canvas.yview)
+        self.recipe_canvas.configure(yscrollcommand=self.recipe_scrollbar.set)
+        self.recipe_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.recipe_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.recipe_inner_frame = ttk.Frame(self.recipe_canvas)
+        self.recipe_canvas.create_window((0, 0), window=self.recipe_inner_frame, anchor="nw")
+        self.recipe_inner_frame.bind(
+            "<Configure>",
+            lambda event: self.recipe_canvas.configure(scrollregion=self.recipe_canvas.bbox("all")),
+        )
+
+        self._refresh_recipe_item_options()
+
+    def _on_global_click(self, event: tk.Event) -> None:
+        widget = event.widget
+        for row in getattr(self, "recipe_rows", []):
+            row.close_dropdowns_except(widget)
+
+    def _load_ui_settings(self) -> Dict[str, Any]:
+        if not UI_SETTINGS_FILE.exists():
+            return {}
+        try:
+            data = json.loads(UI_SETTINGS_FILE.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_ui_settings(self) -> None:
+        try:
+            UI_SETTINGS_FILE.write_text(json.dumps(self.ui_settings, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def _on_notebook_tab_changed(self, event: tk.Event) -> None:
+        if self.notebook.select() != str(self.recipes_tab):
+            return
+        if self.ui_settings.get("hide_recipe_patch_reminder"):
+            return
+        if self._showing_recipe_reminder:
+            return
+        self.after_idle(self._show_recipe_patch_reminder)
+
+    def _show_recipe_patch_reminder(self) -> None:
+        if self.notebook.select() != str(self.recipes_tab) or self._showing_recipe_reminder:
+            return
+
+        self._showing_recipe_reminder = True
+        dialog = tk.Toplevel(self)
+        dialog.title("Recommended First Step")
+        dialog.transient(self)
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        content = ttk.Frame(dialog, padding=14)
+        content.grid(row=0, column=0, sticky="nsew")
+        message = ttk.Label(
+            content,
+            text="It's recommended to run the ID conflict patcher before creating your crafting recipes.",
+            wraplength=380,
+        )
+        message.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 10))
+
+        dont_remind_var = tk.BooleanVar(value=False)
+        dont_remind_check = ttk.Checkbutton(content, text="Don't remind me again", variable=dont_remind_var)
+        dont_remind_check.grid(row=1, column=0, columnspan=2, sticky="w", pady=(0, 12))
+
+        def close_dialog(go_to_ids: bool = False) -> None:
+            if dont_remind_var.get():
+                self.ui_settings["hide_recipe_patch_reminder"] = True
+                self._save_ui_settings()
+            dialog.grab_release()
+            dialog.destroy()
+            self._showing_recipe_reminder = False
+            if go_to_ids:
+                self.notebook.select(self.ids_tab)
+
+        go_button = ttk.Button(content, text="Go there", command=lambda: close_dialog(go_to_ids=True))
+        go_button.grid(row=2, column=0, sticky="e", padx=(0, 8))
+        ok_button = ttk.Button(content, text="Ok", command=close_dialog)
+        ok_button.grid(row=2, column=1, sticky="e")
+        dialog.protocol("WM_DELETE_WINDOW", close_dialog)
+        dialog.bind("<Escape>", lambda _: close_dialog())
+        dialog.bind("<Return>", lambda _: close_dialog())
+        dialog.update_idletasks()
+        x = self.winfo_rootx() + max(0, (self.winfo_width() - dialog.winfo_width()) // 2)
+        y = self.winfo_rooty() + max(0, (self.winfo_height() - dialog.winfo_height()) // 3)
+        dialog.geometry(f"+{x}+{y}")
+        ok_button.focus_set()
 
     def on_select_game_directory(self) -> None:
         path = filedialog.askdirectory(title="Select Unturned Game Directory")
@@ -212,6 +816,98 @@ class MainWindow(tk.Tk):
         widget.insert(0, str(value))
         widget.config(state="readonly")
 
+    def _discover_sources_from_item_csv(self) -> List[WorkshopMod]:
+        if not self.csv_path or not self.csv_path.exists():
+            return []
+
+        import csv
+
+        sources: Dict[str, WorkshopMod] = {}
+        try:
+            with self.csv_path.open("r", encoding="utf-8-sig", newline="") as handle:
+                sample = handle.read(8192)
+                handle.seek(0)
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t")
+                reader = csv.DictReader(handle, dialect=dialect)
+                if not reader.fieldnames:
+                    return []
+                headers = {name.strip().lower(): name for name in reader.fieldnames if name}
+                origin_key = headers.get("origin")
+                if not origin_key:
+                    return []
+
+                for row in reader:
+                    origin_value = row.get(origin_key)
+                    if not origin_value:
+                        continue
+                    origin_text = origin_value.strip()
+                    if not origin_text:
+                        continue
+
+                    lowered = origin_text.lower()
+                    if lowered == "vanilla built-in assets":
+                        sources.setdefault(
+                            "vanilla",
+                            WorkshopMod(
+                                workshop_id="vanilla",
+                                path=None,
+                                title="Vanilla Built-in Assets",
+                                display_name="Vanilla Built-in Assets",
+                                selected=True,
+                                is_virtual=True,
+                            ),
+                        )
+                        continue
+
+                    match = re.search(r"Workshop File(?: \"([^\"]+)\")? \((\d+)\)", origin_text)
+                    if not match:
+                        continue
+                    name_value = match.group(1) or f"Workshop File {match.group(2)}"
+                    workshop_id = match.group(2)
+                    if workshop_id in sources:
+                        continue
+                    sources[workshop_id] = WorkshopMod(
+                        workshop_id=workshop_id,
+                        path=None,
+                        title=name_value,
+                        display_name=f"{name_value} ({workshop_id})",
+                        selected=True,
+                        is_virtual=True,
+                    )
+        except Exception:
+            return []
+        return list(sources.values())
+
+    def _discover_bundle_sources(self) -> List[WorkshopMod]:
+        if not self.game_dir:
+            return []
+        bundle_root = self.game_dir / "Bundles" / "Items"
+        if not bundle_root.exists() or not bundle_root.is_dir():
+            return []
+
+        sources: List[WorkshopMod] = []
+        for candidate in sorted(bundle_root.iterdir()):
+            if not candidate.is_dir():
+                continue
+            if not any(candidate.rglob("*.dat")):
+                continue
+            title = candidate.name.replace("_", " ").title()
+            normalized = re.sub(r"[^a-z0-9]+", " ", candidate.name.lower()).strip()
+            hidden_key = re.sub(r"[^a-z0-9]+", "", candidate.name.lower())
+            hidden = normalized in HIDDEN_BUNDLE_NAMES or hidden_key in HIDDEN_BUNDLE_KEYS
+            sources.append(
+                WorkshopMod(
+                    workshop_id=f"bundle-{candidate.name}",
+                    path=candidate,
+                    title=title,
+                    display_name=f"{title} (Bundles/{candidate.name})",
+                    selected=True,
+                    is_virtual=False,
+                    hidden=hidden,
+                )
+            )
+        return sources
+
     def _validate_game_dir(self, path: Path) -> bool:
         return (path / "Unturned.exe").exists() or (path / "Unturned_Data").exists()
 
@@ -281,13 +977,27 @@ class MainWindow(tk.Tk):
     def _load_workshop_mods(self) -> None:
         self.mods_tree.delete(*self.mods_tree.get_children())
         self.mods = []
+        self._recipe_item_cache.clear()
         if not self.workshop_path or not self.workshop_path.exists():
             return
         self.mods = self.scanner.discover_workshop_mods(self.workshop_path)
-        self.mods.sort(key=lambda mod: mod.title.lower())
+        discovered_sources = self._discover_sources_from_item_csv()
+        for source in discovered_sources:
+            if all(mod.workshop_id != source.workshop_id for mod in self.mods):
+                self.mods.append(source)
+        bundle_sources = self._discover_bundle_sources()
+        for source in bundle_sources:
+            if all(mod.workshop_id != source.workshop_id for mod in self.mods):
+                self.mods.append(source)
+        self.mods.sort(key=lambda mod: (mod.workshop_id.startswith("bundle-"), mod.title.lower()))
         for mod in self.mods:
-            self.mods_tree.insert("", tk.END, iid=mod.workshop_id, values=("☐", mod.title, mod.workshop_id))
-        self.status_label.config(text=f"Loaded {len(self.mods)} workshop mods. Select mods to patch.")
+            mod.hidden = mod.hidden or self._should_hide_mod(mod)
+            mod.selected = mod.hidden
+            if mod.hidden:
+                continue
+            self.mods_tree.insert("", tk.END, iid=mod.workshop_id, values=(UNCHECKED, mod.title, mod.workshop_id))
+        self.status_label.config(text=f"Loaded {len(self.mods)} sources. Visible sources start unselected.")
+        self._refresh_recipe_item_options()
 
     def _update_start_button(self) -> None:
         enabled = bool(self.workshop_path and self.csv_path and self.log_path and self.mods)
@@ -302,16 +1012,164 @@ class MainWindow(tk.Tk):
         if not item_id or column != "#1":
             return
         current = self.mods_tree.set(item_id, "selected")
-        new_value = "☐" if current == "☑" else "☑"
+        new_value = UNCHECKED if current == CHECKED else CHECKED
         self.mods_tree.set(item_id, "selected", new_value)
+        mod = next((m for m in self.mods if m.workshop_id == item_id), None)
+        if mod:
+            mod.selected = new_value == CHECKED
+        self._schedule_recipe_item_refresh()
 
     def _get_selected_mods(self) -> List[WorkshopMod]:
         selected: List[WorkshopMod] = []
         for mod in self.mods:
+            if mod.hidden:
+                if mod.selected:
+                    selected.append(mod)
+                continue
             cell = self.mods_tree.set(mod.workshop_id, "selected")
-            if cell == "☑":
+            mod.selected = cell == CHECKED
+            if mod.selected:
                 selected.append(mod)
         return selected
+
+    def _format_recipe_label(self, value: Optional[str]) -> str:
+        if not value:
+            return "Unknown"
+        return re.sub(r"_+", " ", value).strip()
+
+    def _should_hide_mod(self, mod: WorkshopMod) -> bool:
+        values = [mod.workshop_id, mod.title, mod.display_name]
+        if mod.path:
+            values.append(mod.path.name)
+        for value in values:
+            compact = re.sub(r"[^a-z0-9]+", "", str(value).lower())
+            if compact in HIDDEN_BUNDLE_KEYS:
+                return True
+        return False
+
+    def _get_selected_recipe_items(self) -> List[Tuple[str, int]]:
+        items: List[Tuple[str, int]] = []
+        seen: set[Tuple[str, int]] = set()
+        for mod in self.mods:
+            if not mod.selected or not mod.path:
+                continue
+            cache_key = str(mod.path.resolve())
+            if cache_key not in self._recipe_item_cache:
+                mod_items: List[Tuple[str, int]] = []
+                scanner = DatAssetScanner(mod.path)
+                scanner.scan_all_files()
+                for blocks in scanner.asset_files.values():
+                    for block in blocks:
+                        if block.legacy_id is None:
+                            continue
+                        label_candidate = block.name or block.file_path.stem or block.file_path.parent.name or block.asset_type
+                        label_base = self._format_recipe_label(label_candidate)
+                        mod_items.append((f"{label_base} ({block.legacy_id})", block.legacy_id))
+                self._recipe_item_cache[cache_key] = mod_items
+            for label, legacy_id in self._recipe_item_cache[cache_key]:
+                if (label, legacy_id) in seen:
+                    continue
+                seen.add((label, legacy_id))
+                items.append((label, legacy_id))
+        items.sort(key=lambda item: item[0].lower())
+        return items
+
+    def _schedule_recipe_item_refresh(self) -> None:
+        if self._recipe_refresh_after_id is not None:
+            self.after_cancel(self._recipe_refresh_after_id)
+        self._recipe_refresh_after_id = self.after(120, self._refresh_recipe_item_options)
+
+    def _refresh_recipe_item_options(self) -> None:
+        self._recipe_refresh_after_id = None
+        item_entries = self._get_selected_recipe_items()
+        self.recipe_items = [label for label, _ in item_entries]
+        self.recipe_item_map = {label: legacy_id for label, legacy_id in item_entries}
+        for row in getattr(self, "recipe_rows", []):
+            row.update_options(self.recipe_items, self.recipe_item_map)
+        self.recipe_status_label.config(text=f"{len(self.recipe_rows)} recipes, {len(self.recipe_items)} selectable items")
+
+    def on_add_recipe(self) -> None:
+        if not self.recipe_items:
+            messagebox.showwarning("No available recipe items", "Select at least one compatible item source in the IDs tab before creating recipes.")
+            return
+        self._add_recipe_row()
+
+    def _add_recipe_row(self) -> None:
+        row = RecipeRow(self.recipe_inner_frame, self.recipe_items, self.recipe_item_map, self._update_recipe_status)
+        self.recipe_rows.append(row)
+        row.set_recipe_name(f"RecipePatch{len(self.recipe_rows)}")
+        row.put_in_parent(len(self.recipe_rows) - 1)
+        self._update_recipe_status()
+
+    def _update_recipe_status(self) -> None:
+        if not getattr(self, "recipe_rows", None):
+            self.recipe_status_label.config(text="No recipes defined")
+            return
+        self.recipe_status_label.config(text=f"{len(self.recipe_rows)} recipes, {len(self.recipe_items)} selectable items")
+
+    def _find_latest_mapping_file(self) -> Optional[Path]:
+        if not self.last_output_path or not self.last_output_path.exists():
+            return None
+        candidates = sorted(self.last_output_path.glob("mapping_*.json"))
+        if candidates:
+            return candidates[-1]
+        candidates = sorted(self.last_output_path.glob("mapping_*.txt"))
+        return candidates[-1] if candidates else None
+
+    def _normalize_recipe_name(self, raw_name: str, fallback_index: int) -> str:
+        name = raw_name.strip() or f"RecipePatch{fallback_index}"
+        return re.sub(r"[^A-Za-z0-9_-]+", "_", name)
+
+    def _gather_recipe_definitions(self) -> List[dict]:
+        definitions = []
+        for row_index, row in enumerate(self.recipe_rows, start=1):
+            ingredient_label_groups = row.get_ingredient_label_groups()
+            output_label = row.get_output_label()
+            if len(ingredient_label_groups) < 2 or not output_label:
+                continue
+            if output_label not in self.recipe_item_map:
+                continue
+            tool_indices = row.get_tool_indices()
+            label_combinations = list(product(*ingredient_label_groups))
+            base_name = self._normalize_recipe_name(row.get_recipe_name(), row_index)
+            for combination_index, label_combination in enumerate(label_combinations, start=1):
+                ingredient_ids = [
+                    self.recipe_item_map[label]
+                    for label in label_combination
+                    if label in self.recipe_item_map
+                ]
+                if len(ingredient_ids) < 2:
+                    continue
+                definitions.append(
+                    {
+                        "ingredients": ingredient_ids,
+                        "result": self.recipe_item_map[output_label],
+                        "tool_indices": tool_indices,
+                        "patch_name": base_name if len(label_combinations) == 1 else f"{base_name}_{combination_index}",
+                    }
+                )
+        return definitions
+
+    def on_generate_recipes(self) -> None:
+        definitions = self._gather_recipe_definitions()
+        if not definitions:
+            messagebox.showwarning("No valid recipes", "Define at least one recipe with two ingredients and one output.")
+            return
+        mapping_file = self._find_latest_mapping_file()
+        output_location = self.output_path or self.output_base
+        builder = RecipeBuilder(
+            workshop_root=self.workshop_path or Path.cwd(),
+            csv_path=self.csv_path or Path.cwd(),
+            game_root=self.game_dir,
+            mapping_json=mapping_file,
+            output_root=output_location,
+        )
+        try:
+            patch_root = builder.build_recipes(definitions)
+            messagebox.showinfo("Recipes Generated", f"Created {len(definitions)} recipes in:\n{patch_root}")
+            self._open_folder(patch_root)
+        except Exception as exc:
+            messagebox.showerror("Recipe Generation Failed", str(exc))
 
     def _on_mods_tree_double_click(self, event: Any) -> None:
         item_id = self.mods_tree.identify_row(event.y)
@@ -359,6 +1217,7 @@ class MainWindow(tk.Tk):
             dry_run=self.dry_run_var.get(),
             export_csv=self.export_csv_var.get(),
             export_json=self.export_json_var.get(),
+            game_root=self.game_dir,
             log_callback=self._enqueue_log,
             progress_callback=self._enqueue_progress,
             finished_callback=self._enqueue_finished,
