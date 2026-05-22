@@ -191,18 +191,33 @@ class PatchBuilder:
         self._log("Loading available ID pool from CSV")
         self.id_manager.load_from_csv(self.csv_path)
         self._emit_progress(0, 100, "Loaded ID availability")
+        self._log("Scanning existing IDs from patch workspace and game bundles")
+        self._emit_progress(0, 100, "Scanning existing IDs")
         existing_ids = self._collect_existing_ids()
         self.id_manager.mark_existing_ids(existing_ids)
         self._log(self.id_manager.summary())
 
     def _collect_existing_ids(self) -> Set[int]:
         ids: Set[int] = set()
-        scanner = DatAssetScanner(self.workshop_root)
-        ids.update(scanner.collect_used_ids())
+        scan_roots: List[Path] = []
+        if self.patch_root.exists():
+            scan_roots.append(self.patch_root)
+        else:
+            scan_roots.extend(
+                mod.path
+                for mod in self.selected_mods
+                if mod.path and mod.path.exists()
+            )
         if self.game_root and self.game_root.exists():
-            scanner = DatAssetScanner(self.game_root)
+            bundles_root = self.game_root / "Bundles"
+            scan_roots.append(bundles_root if bundles_root.exists() else self.game_root)
+
+        for index, scan_root in enumerate(scan_roots, start=1):
+            self._log(f"Scanning existing IDs in {scan_root}")
+            self._emit_progress(index, len(scan_roots) + 1, f"Scanning IDs in {scan_root.name}")
+            scanner = DatAssetScanner(scan_root)
             ids.update(scanner.collect_used_ids())
-        self._log(f"Collected {len(ids)} existing IDs from workshop and game content")
+        self._log(f"Collected {len(ids)} existing IDs from patch workspace and game content")
         return ids
 
     def _process_conflicts(self, conflicts: List[Conflict]) -> None:

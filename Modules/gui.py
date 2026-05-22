@@ -66,6 +66,8 @@ HIDDEN_BUNDLE_KEYS.add("combocrate2024")
 
 UNCHECKED = "[ ]"
 CHECKED = "[x]"
+NO_RESULTS_TEXT = "No results found"
+MAX_DROPDOWN_RESULTS = 250
 UI_SETTINGS_FILE = Path(__file__).resolve().parent / "ui_settings.json"
 
 from .models import WorkshopMod
@@ -73,6 +75,57 @@ from .parsers import DatAssetScanner
 from .workshop import WorkshopScanner
 from .worker import PatchWorker
 from .recipe_builder import RecipeBuilder
+
+
+class Tooltip:
+    def __init__(self, widget: tk.Widget, text_provider: Callable[[], str]):
+        self.widget = widget
+        self.text_provider = text_provider
+        self.tip: Optional[tk.Toplevel] = None
+        self.after_id: Optional[str] = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, event: tk.Event) -> None:
+        self._cancel()
+        self.after_id = self.widget.after(350, self._show)
+
+    def _cancel(self) -> None:
+        if self.after_id is not None:
+            self.widget.after_cancel(self.after_id)
+            self.after_id = None
+
+    def _show(self) -> None:
+        self.after_id = None
+        text = self.text_provider()
+        if not text:
+            return
+        if self.tip and self.tip.winfo_exists():
+            self.tip.destroy()
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.overrideredirect(True)
+        self.tip.attributes("-topmost", True)
+        x = self.widget.winfo_rootx() + 12
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        label = tk.Label(
+            self.tip,
+            text=text,
+            background="#ffffe0",
+            foreground="black",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=6,
+            pady=3,
+        )
+        label.pack()
+        self.tip.geometry(f"+{x}+{y}")
+
+    def _hide(self, event: Optional[tk.Event] = None) -> None:
+        self._cancel()
+        if self.tip and self.tip.winfo_exists():
+            self.tip.destroy()
+        self.tip = None
 
 
 class RecipeItemPicker:
@@ -89,6 +142,7 @@ class RecipeItemPicker:
         self.on_update = on_update
         self.allow_multi_select = allow_multi_select
         self.selected_labels: List[str] = []
+        self.amount = 1
         self.var = tk.StringVar()
         self.border_frame = tk.Frame(parent, background="black", borderwidth=0)
         self.frame = ttk.Frame(self.border_frame)
@@ -99,16 +153,20 @@ class RecipeItemPicker:
         self.frame.columnconfigure(0, weight=1)
         self.entry.bind("<Return>", self._on_sort)
         self.entry.bind("<Button-1>", self._on_click)
+        self.entry.bind("<Button-3>", self._on_amount_menu)
+        self.border_frame.bind("<Button-3>", self._on_amount_menu)
         self.entry.bind("<KeyRelease>", self._on_key_release)
         self.entry.bind("<Down>", self._on_arrow_down)
         self.entry.bind("<Up>", self._on_arrow_up)
         self.entry.bind("<Enter>", self._start_marquee)
         self.entry.bind("<Leave>", self._stop_marquee)
+        self.tooltip = Tooltip(self.entry, lambda: f"Amount: {self.amount}")
         self.dropdown_frame: Optional[ttk.Frame] = None
         self.listbox: Optional[tk.Listbox] = None
         self.dropdown_values: List[str] = []
         self._marquee_after_id: Optional[str] = None
         self._marquee_resume_after_id: Optional[str] = None
+        self._filter_after_id: Optional[str] = None
         self._marquee_position = 0.0
         self._active_index: Optional[int] = None
         self._show_internal_selection = True
@@ -122,10 +180,7 @@ class RecipeItemPicker:
             query = ""
         if not query:
             return self.option_values
-        return sorted(
-            self.option_values,
-            key=lambda value: (query not in value.lower(), value.lower()),
-        )
+        return [value for value in self.option_values if query in value.lower()]
 
     def _display_value(self) -> str:
         return "/".join(self.selected_labels)
@@ -147,11 +202,20 @@ class RecipeItemPicker:
         self._pause_marquee_for_typing()
         self._show_internal_selection = False
         self._active_index = None
+        self._schedule_filter_refresh()
+        self._active_index = None
+
+    def _schedule_filter_refresh(self) -> None:
+        if self._filter_after_id is not None:
+            self.entry.after_cancel(self._filter_after_id)
+        self._filter_after_id = self.entry.after(80, self._refresh_filter)
+
+    def _refresh_filter(self) -> None:
+        self._filter_after_id = None
         if self.dropdown_frame and self.dropdown_frame.winfo_exists():
             self._populate(self._matching_options())
         else:
             self.open_dropdown(focus_list=False)
-        self._active_index = None
 
     def _on_arrow_down(self, event: tk.Event) -> str:
         self.open_dropdown(focus_list=False)
@@ -165,6 +229,8 @@ class RecipeItemPicker:
 
     def _move_highlight(self, direction: int, start_at_first: bool = False) -> None:
         if not self.listbox or self.listbox.size() == 0:
+            return
+        if self.listbox.size() == 1 and self.listbox.get(0) == NO_RESULTS_TEXT:
             return
         if self._active_index is None and start_at_first:
             index = 0
@@ -185,6 +251,8 @@ class RecipeItemPicker:
         if index is None:
             return
         label = self.listbox.get(index)
+        if label == NO_RESULTS_TEXT:
+            return
         self.selected_labels = [label]
         self._show_internal_selection = True
         self._refresh_display()
@@ -254,6 +322,7 @@ class RecipeItemPicker:
         self.listbox.grid(row=0, column=0, sticky="ew", padx=(1, 0), pady=1)
         scrollbar.grid(row=0, column=1, sticky="ns", padx=(0, 1), pady=1)
         self.listbox.bind("<ButtonRelease-1>", self._on_list_click)
+        self.listbox.bind("<Button-3>", self._on_amount_menu)
         self.listbox.bind("<Escape>", lambda _: self.close_dropdown(restore_focus=True))
         self._populate(values)
         if self.listbox.size() > 0 and self._active_index is None:
@@ -269,12 +338,13 @@ class RecipeItemPicker:
         self.dropdown_values = values
         previous = self.listbox.get(tk.ACTIVE) if self.listbox.size() else ""
         self.listbox.delete(0, tk.END)
-        for value in values:
+        display_values = values[:MAX_DROPDOWN_RESULTS] or [NO_RESULTS_TEXT]
+        for value in display_values:
             self.listbox.insert(tk.END, value)
             if self._show_internal_selection and value in self.selected_labels:
                 self.listbox.selection_set(tk.END)
-        if values:
-            active_index = values.index(previous) if self._active_index is not None and previous in values else 0
+        if display_values[0] != NO_RESULTS_TEXT:
+            active_index = display_values.index(previous) if self._active_index is not None and previous in display_values else 0
             if self._active_index is not None:
                 self._active_index = active_index
             self.listbox.activate(active_index)
@@ -289,6 +359,8 @@ class RecipeItemPicker:
         if index < 0:
             return "break"
         label = self.listbox.get(index)
+        if label == NO_RESULTS_TEXT:
+            return "break"
         self._active_index = index
         self.listbox.activate(index)
         self._show_internal_selection = True
@@ -296,10 +368,11 @@ class RecipeItemPicker:
         if shift_pressed:
             if label in self.selected_labels:
                 self.selected_labels.remove(label)
+                self.listbox.selection_clear(index)
             else:
                 self.selected_labels.append(label)
+                self.listbox.selection_set(index)
             self._refresh_display()
-            self._populate(self.dropdown_values)
         else:
             self.selected_labels = [label]
             self._refresh_display()
@@ -307,7 +380,53 @@ class RecipeItemPicker:
         self.on_update()
         return "break"
 
+    def _on_amount_menu(self, event: tk.Event) -> str:
+        self._show_amount_popup(event.x_root, event.y_root)
+        return "break"
+
+    def _show_amount_popup(self, x: int, y: int) -> None:
+        popup = tk.Toplevel(self.entry)
+        popup.title("")
+        popup.transient(self.entry.winfo_toplevel())
+        popup.resizable(False, False)
+        popup.grab_set()
+
+        content = ttk.Frame(popup, padding=8)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Amount:").grid(row=0, column=0, sticky="w", padx=(0, 6))
+        amount_var = tk.StringVar(value=str(self.amount))
+        amount_entry = ttk.Entry(content, textvariable=amount_var, width=8)
+        amount_entry.grid(row=0, column=1, sticky="ew")
+
+        def clean_amount() -> None:
+            cleaned = re.sub(r"\D+", "", amount_var.get())
+            if cleaned != amount_var.get():
+                amount_var.set(cleaned)
+                amount_entry.icursor(tk.END)
+
+        def apply_amount() -> None:
+            clean_amount()
+            self.amount = max(1, int(amount_var.get() or "1"))
+            popup.grab_release()
+            popup.destroy()
+            self.on_update()
+
+        amount_entry.bind("<KeyRelease>", lambda _: clean_amount())
+        amount_entry.bind("<Return>", lambda _: apply_amount())
+        def close_popup() -> None:
+            popup.grab_release()
+            popup.destroy()
+
+        popup.bind("<Escape>", lambda _: close_popup())
+        ttk.Button(content, text="Ok", command=apply_amount).grid(row=0, column=2, padx=(8, 0))
+        popup.protocol("WM_DELETE_WINDOW", close_popup)
+        popup.geometry(f"+{x}+{y}")
+        amount_entry.focus_set()
+
     def close_dropdown(self, restore_focus: bool = False) -> None:
+        if self._filter_after_id is not None:
+            self.entry.after_cancel(self._filter_after_id)
+            self._filter_after_id = None
         if self.dropdown_frame and self.dropdown_frame.winfo_exists():
             self.dropdown_frame.destroy()
         self.dropdown_frame = None
@@ -324,6 +443,16 @@ class RecipeItemPicker:
         if self.dropdown_frame and self.dropdown_frame.winfo_exists():
             self._populate(self._matching_options())
 
+    def set_labels(self, labels: List[str]) -> None:
+        if self.allow_multi_select:
+            self.selected_labels = [label for label in labels if label in self.option_values]
+        else:
+            self.selected_labels = [label for label in labels[:1] if label in self.option_values]
+        self._refresh_display()
+
+    def set_amount(self, amount: int) -> None:
+        self.amount = max(1, int(amount or 1))
+
     def get_labels(self) -> List[str]:
         typed = self.entry.get().strip()
         if self.selected_labels:
@@ -331,6 +460,9 @@ class RecipeItemPicker:
         if typed in self.option_values:
             return [typed]
         return []
+
+    def get_amount(self) -> int:
+        return self.amount
 
     def contains_widget(self, widget: tk.Widget) -> bool:
         current: Optional[tk.Widget] = widget
@@ -358,8 +490,20 @@ class IngredientWidget:
         self.option_values = option_values
         self.picker.update_options(option_values)
 
+    def set_labels(self, labels: List[str]) -> None:
+        self.picker.set_labels(labels)
+
+    def set_amount(self, amount: int) -> None:
+        self.picker.set_amount(amount)
+
+    def set_tool(self, is_tool: bool) -> None:
+        self.tool_var.set(is_tool)
+
     def get_labels(self) -> List[str]:
         return self.picker.get_labels()
+
+    def get_amount(self) -> int:
+        return self.picker.get_amount()
 
     def is_tool(self) -> bool:
         return self.tool_var.get()
@@ -372,19 +516,36 @@ class RecipeRow:
         option_values: List[str],
         option_map: Dict[str, int],
         on_update: Callable[[], None],
+        on_remove: Optional[Callable[[Any], None]] = None,
     ):
         self.parent = parent
         self.option_values = option_values
         self.option_map = option_map
         self.on_update = on_update
-        self.frame = ttk.Frame(parent)
+        self.on_remove = on_remove
+        self.container = tk.Frame(parent, background="black")
+        self.frame = ttk.Frame(self.container, padding=4)
+        self.frame.grid(row=0, column=0, sticky="ew", padx=0, pady=(0, 1))
+        self.container.columnconfigure(0, weight=1)
         self.ingredients: List[IngredientWidget] = []
         self.name_var = tk.StringVar()
+        self.description = ""
         self.name_entry = ttk.Entry(self.frame, textvariable=self.name_var, width=20)
         self.name_entry.bind("<KeyRelease>", self._on_name_change)
+        self.name_entry.bind("<Button-3>", self._on_description_menu)
         self.result_picker = RecipeItemPicker(self.frame, option_values, self.on_update, allow_multi_select=False)
         self.add_button = ttk.Button(self.frame, text="+", width=2, command=self.add_component, style="Green.TButton")
         self.add_button.bind("<Button-3>", lambda _: self.remove_component())
+        self.remove_button = tk.Button(
+            self.frame,
+            text="X",
+            width=2,
+            foreground="#b00020",
+            activeforeground="#b00020",
+            command=self._remove_self,
+            padx=2,
+            pady=0,
+        )
         self.equals_label = ttk.Label(self.frame, text="=")
         self._add_ingredient()
         self._layout()
@@ -395,6 +556,39 @@ class RecipeRow:
             self.name_var.set(cleaned)
             self.name_entry.icursor(tk.END)
         self.on_update()
+
+    def _on_description_menu(self, event: tk.Event) -> str:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Recipe Description")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text="Description").grid(row=0, column=0, padx=10, pady=(10, 4), sticky="w")
+        text = tk.Text(dialog, width=48, height=5, wrap="word")
+        text.grid(row=1, column=0, columnspan=2, padx=10, pady=(0, 10), sticky="ew")
+        text.insert("1.0", self.description)
+        text.focus_set()
+
+        def save() -> None:
+            self.description = " ".join(text.get("1.0", "end").split()).strip()
+            dialog.destroy()
+            self.on_update()
+
+        def cancel() -> None:
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Ok", command=save).grid(row=2, column=0, padx=(10, 4), pady=(0, 10), sticky="e")
+        ttk.Button(dialog, text="Cancel", command=cancel).grid(row=2, column=1, padx=(4, 10), pady=(0, 10), sticky="w")
+        dialog.update_idletasks()
+        x = event.x_root
+        y = event.y_root
+        dialog.geometry(f"+{x}+{y}")
+        return "break"
+
+    def _remove_self(self) -> None:
+        if self.on_remove:
+            self.on_remove(self)
 
     def _add_ingredient(self) -> None:
         show_tool_checkbox = len(self.ingredients) > 0
@@ -430,6 +624,7 @@ class RecipeRow:
         self.equals_label.grid(row=0, column=max_cols + 1, padx=(0, 4), sticky="nw")
         self.result_picker.grid(row=0, column=max_cols + 2, padx=(0, 4), sticky="new")
         self.frame.columnconfigure(max_cols + 2, weight=1)
+        self.remove_button.grid(row=0, column=max_cols + 3, padx=(4, 0), sticky="ne")
 
         next_index = len(self.ingredients)
         last_row = next_index // max_cols
@@ -449,18 +644,54 @@ class RecipeRow:
     def get_recipe_name(self) -> str:
         return self.name_var.get().strip()
 
+    def set_description(self, description: str) -> None:
+        self.description = " ".join(str(description).split()).strip()
+
+    def get_description(self) -> str:
+        return self.description
+
     def get_ingredient_label_groups(self) -> List[List[str]]:
         return [labels for ingredient in self.ingredients if (labels := ingredient.get_labels())]
+
+    def get_ingredient_amounts(self) -> List[int]:
+        return [ingredient.get_amount() for ingredient in self.ingredients if ingredient.get_labels()]
 
     def get_output_label(self) -> str:
         labels = self.result_picker.get_labels()
         return labels[0] if labels else ""
 
+    def get_output_amount(self) -> int:
+        return self.result_picker.get_amount()
+
+    def configure_recipe(
+        self,
+        name: str,
+        ingredient_labels: List[str],
+        ingredient_amounts: List[int],
+        tool_indices: List[int],
+        output_label: str,
+        output_amount: int,
+        description: str = "",
+    ) -> None:
+        self.set_recipe_name(name)
+        self.set_description(description)
+        while len(self.ingredients) < len(ingredient_labels):
+            self._add_ingredient()
+        self._layout()
+        for index, label in enumerate(ingredient_labels):
+            self.ingredients[index].set_labels([label])
+            amount = ingredient_amounts[index] if index < len(ingredient_amounts) else 1
+            self.ingredients[index].set_amount(amount)
+            self.ingredients[index].set_tool(index in tool_indices)
+        self.result_picker.set_labels([output_label])
+        self.result_picker.set_amount(output_amount)
+        self.on_update()
+
     def get_tool_indices(self) -> List[int]:
         return [index for index, ingredient in enumerate(self.ingredients) if ingredient.is_tool()]
 
     def put_in_parent(self, row: int) -> None:
-        self.frame.grid(row=row, column=0, sticky="ew", pady=4)
+        self.container.grid(row=row, column=0, sticky="ew", pady=4)
         self.parent.columnconfigure(0, weight=1)
 
     def close_dropdowns_except(self, widget: tk.Widget) -> None:
@@ -622,6 +853,8 @@ class MainWindow(tk.Tk):
         self.recipe_rows: List[RecipeRow] = []
         self.recipe_items: List[str] = []
         self.recipe_item_map: Dict[str, int] = {}
+        self.export_recipes_csv_var = tk.BooleanVar(value=False)
+        self.recipes_csv_path: Optional[Path] = None
 
         toolbar = ttk.Frame(self.recipes_tab)
         toolbar.pack(fill=tk.X, pady=(0, 10))
@@ -634,6 +867,16 @@ class MainWindow(tk.Tk):
 
         self.recipe_status_label = ttk.Label(toolbar, text="No recipes defined")
         self.recipe_status_label.pack(side=tk.LEFT, padx=(20, 0))
+
+        import_frame = ttk.Frame(self.recipes_tab)
+        import_frame.pack(fill=tk.X, pady=(0, 10))
+        self.import_recipes_csv_button = ttk.Button(import_frame, text="Select Recipes.csv", command=self.on_select_recipes_csv)
+        self.import_recipes_csv_button.grid(row=0, column=0, sticky=tk.W)
+        self.recipes_csv_label = ttk.Entry(import_frame, state="readonly")
+        self.recipes_csv_label.grid(row=0, column=1, sticky=tk.EW, padx=5)
+        import_frame.columnconfigure(1, weight=1)
+        self._set_label(self.recipes_csv_label, "<optional Recipes.csv>")
+        self._enable_recipes_csv_drop()
 
         recipe_frame = ttk.Frame(self.recipes_tab)
         recipe_frame.pack(fill=tk.BOTH, expand=True)
@@ -650,6 +893,12 @@ class MainWindow(tk.Tk):
             "<Configure>",
             lambda event: self.recipe_canvas.configure(scrollregion=self.recipe_canvas.bbox("all")),
         )
+
+        bottom_options = ttk.Frame(self.recipes_tab)
+        bottom_options.pack(fill=tk.X, pady=(10, 0))
+        self.export_recipes_csv_checkbox = ttk.Checkbutton(bottom_options, text="Export Recipes.csv", variable=self.export_recipes_csv_var)
+        self.export_recipes_csv_checkbox.pack(side=tk.LEFT)
+        self.generate_recipes_button.state(["disabled"])
 
         self._refresh_recipe_item_options()
 
@@ -672,6 +921,114 @@ class MainWindow(tk.Tk):
             UI_SETTINGS_FILE.write_text(json.dumps(self.ui_settings, indent=2), encoding="utf-8")
         except Exception:
             pass
+
+    def _enable_recipes_csv_drop(self) -> None:
+        try:
+            self.tk.call("package", "require", "tkdnd")
+            for widget in [self.recipes_csv_label, self.recipes_tab]:
+                self.tk.call("tkdnd::drop_target", "register", widget._w, "DND_Files")
+                widget.bind("<<Drop>>", self._on_recipes_csv_drop)
+            self.recipes_csv_label.configure(state="normal")
+            self.recipes_csv_label.delete(0, tk.END)
+            self.recipes_csv_label.insert(0, "<optional Recipes.csv - drag file here or select>")
+            self.recipes_csv_label.configure(state="readonly")
+        except Exception:
+            pass
+
+    def _on_recipes_csv_drop(self, event: tk.Event) -> None:
+        raw_path = str(getattr(event, "data", "")).strip()
+        if not raw_path:
+            return
+        if raw_path.startswith("{") and raw_path.endswith("}"):
+            raw_path = raw_path[1:-1]
+        first_path = raw_path.split("} {")[0].strip("{}")
+        self._set_recipes_csv_path(Path(first_path))
+
+    def on_select_recipes_csv(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Select Recipes.csv",
+            filetypes=[("Recipes CSV", "*.csv"), ("All Files", "*")],
+        )
+        if not path:
+            return
+        self._set_recipes_csv_path(Path(path))
+
+    def _set_recipes_csv_path(self, path: Path) -> None:
+        if not path.exists():
+            messagebox.showerror("Invalid Recipes.csv", "Selected Recipes.csv does not exist.")
+            return
+        self.recipes_csv_path = path
+        self._set_label(self.recipes_csv_label, path)
+        self._append_log(f"Loaded recipe tracking CSV: {path}")
+        imported = self._import_custom_recipes_from_csv(path)
+        if imported:
+            self._append_log(f"Imported {imported} custom recipe row(s) from Recipes.csv")
+
+    def _parse_csv_json_list(self, value: str, fallback: Optional[list] = None) -> list:
+        if not value:
+            return fallback or []
+        try:
+            parsed = json.loads(value)
+            return parsed if isinstance(parsed, list) else (fallback or [])
+        except Exception:
+            return fallback or []
+
+    def _import_custom_recipes_from_csv(self, path: Path) -> int:
+        import csv
+
+        imported = 0
+        skipped = 0
+        try:
+            with path.open("r", encoding="utf-8-sig", newline="") as handle:
+                reader = csv.DictReader(handle)
+                for record in reader:
+                    ingredient_labels = [
+                        str(label)
+                        for label in self._parse_csv_json_list(record.get("IngredientLabels", ""))
+                        if str(label) in self.recipe_item_map
+                    ]
+                    output_label = (record.get("OutputLabel") or "").strip()
+                    if not ingredient_labels or output_label not in self.recipe_item_map:
+                        if record.get("CustomRecipeName") or record.get("IngredientLabels") or record.get("OutputLabel"):
+                            skipped += 1
+                        continue
+
+                    ingredient_amounts = [
+                        max(1, int(value))
+                        for value in self._parse_csv_json_list(record.get("IngredientAmounts", ""))
+                        if str(value).isdigit()
+                    ]
+                    tool_indices = [
+                        int(value)
+                        for value in self._parse_csv_json_list(record.get("ToolIndices", ""))
+                        if str(value).isdigit()
+                    ]
+                    output_amount_text = (record.get("OutputAmount") or "1").strip()
+                    output_amount = int(output_amount_text) if output_amount_text.isdigit() else 1
+                    name = (record.get("CustomRecipeName") or record.get("Name") or f"ImportedRecipe{len(self.recipe_rows) + 1}").strip()
+
+                    description = (record.get("Description") or "").strip()
+
+                    row = RecipeRow(
+                        self.recipe_inner_frame,
+                        self.recipe_items,
+                        self.recipe_item_map,
+                        self._update_recipe_status,
+                        self._remove_recipe_row,
+                    )
+                    self.recipe_rows.append(row)
+                    row.configure_recipe(name, ingredient_labels, ingredient_amounts, tool_indices, output_label, output_amount, description)
+                    row.put_in_parent(len(self.recipe_rows) - 1)
+                    imported += 1
+            self._update_recipe_status()
+            if skipped:
+                messagebox.showinfo(
+                    "Recipes.csv Imported",
+                    f"Imported {imported} custom recipe rows.\nSkipped {skipped} rows because their items are not currently selectable.",
+                )
+        except Exception as exc:
+            messagebox.showerror("Recipes.csv Import Failed", str(exc))
+        return imported
 
     def _on_notebook_tab_changed(self, event: tk.Event) -> None:
         if self.notebook.select() != str(self.recipes_tab):
@@ -1095,10 +1452,25 @@ class MainWindow(tk.Tk):
         self._add_recipe_row()
 
     def _add_recipe_row(self) -> None:
-        row = RecipeRow(self.recipe_inner_frame, self.recipe_items, self.recipe_item_map, self._update_recipe_status)
+        row = RecipeRow(
+            self.recipe_inner_frame,
+            self.recipe_items,
+            self.recipe_item_map,
+            self._update_recipe_status,
+            self._remove_recipe_row,
+        )
         self.recipe_rows.append(row)
         row.set_recipe_name(f"RecipePatch{len(self.recipe_rows)}")
         row.put_in_parent(len(self.recipe_rows) - 1)
+        self._update_recipe_status()
+
+    def _remove_recipe_row(self, row: RecipeRow) -> None:
+        if row not in self.recipe_rows:
+            return
+        self.recipe_rows.remove(row)
+        row.container.destroy()
+        for index, recipe_row in enumerate(self.recipe_rows):
+            recipe_row.put_in_parent(index)
         self._update_recipe_status()
 
     def _update_recipe_status(self) -> None:
@@ -1110,11 +1482,31 @@ class MainWindow(tk.Tk):
     def _find_latest_mapping_file(self) -> Optional[Path]:
         if not self.last_output_path or not self.last_output_path.exists():
             return None
-        candidates = sorted(self.last_output_path.glob("mapping_*.json"))
-        if candidates:
-            return candidates[-1]
-        candidates = sorted(self.last_output_path.glob("mapping_*.txt"))
-        return candidates[-1] if candidates else None
+        search_roots = [self.last_output_path]
+        if self.last_output_path.name.lower() == "compatibilitypatch":
+            search_roots.append(self.last_output_path.parent)
+        for pattern in ["mapping_*.json", "mapping_*.txt"]:
+            candidates: List[Path] = []
+            for root in search_roots:
+                candidates.extend(root.glob(pattern))
+            if candidates:
+                return sorted(candidates)[-1]
+        return None
+
+    def _get_recipe_output_root(self) -> Optional[Path]:
+        if not self.last_output_path or not self.last_output_path.exists():
+            return None
+        patch_root = self.last_output_path
+        if patch_root.name.lower() != "compatibilitypatch":
+            compatibility_patch = patch_root / "CompatibilityPatch"
+            if compatibility_patch.exists():
+                patch_root = compatibility_patch
+
+        content_dirs = [path for path in patch_root.iterdir() if path.is_dir()]
+        if not content_dirs:
+            return patch_root
+        with_items = [path for path in content_dirs if (path / "Items").exists()]
+        return sorted(with_items or content_dirs, key=lambda path: path.name.lower())[0]
 
     def _normalize_recipe_name(self, raw_name: str, fallback_index: int) -> str:
         name = raw_name.strip() or f"RecipePatch{fallback_index}"
@@ -1125,11 +1517,12 @@ class MainWindow(tk.Tk):
         for row_index, row in enumerate(self.recipe_rows, start=1):
             ingredient_label_groups = row.get_ingredient_label_groups()
             output_label = row.get_output_label()
-            if len(ingredient_label_groups) < 2 or not output_label:
+            if len(ingredient_label_groups) < 1 or not output_label:
                 continue
             if output_label not in self.recipe_item_map:
                 continue
             tool_indices = row.get_tool_indices()
+            ingredient_amounts = row.get_ingredient_amounts()
             label_combinations = list(product(*ingredient_label_groups))
             base_name = self._normalize_recipe_name(row.get_recipe_name(), row_index)
             for combination_index, label_combination in enumerate(label_combinations, start=1):
@@ -1138,38 +1531,71 @@ class MainWindow(tk.Tk):
                     for label in label_combination
                     if label in self.recipe_item_map
                 ]
-                if len(ingredient_ids) < 2:
+                if len(ingredient_ids) < 1:
                     continue
                 definitions.append(
                     {
                         "ingredients": ingredient_ids,
                         "result": self.recipe_item_map[output_label],
                         "tool_indices": tool_indices,
+                        "ingredient_amounts": ingredient_amounts,
+                        "ingredient_labels": list(label_combination),
+                        "output_amount": row.get_output_amount(),
+                        "output_label": output_label,
+                        "recipe_name": base_name,
+                        "description": row.get_description(),
                         "patch_name": base_name if len(label_combinations) == 1 else f"{base_name}_{combination_index}",
                     }
                 )
         return definitions
 
     def on_generate_recipes(self) -> None:
+        output_location = self._get_recipe_output_root()
+        if output_location is None:
+            messagebox.showwarning(
+                "Run ID patch first",
+                "Run the ID conflict patcher before generating recipes so they can be added to the generated compatibility patch.",
+            )
+            self.notebook.select(self.ids_tab)
+            return
         definitions = self._gather_recipe_definitions()
         if not definitions:
-            messagebox.showwarning("No valid recipes", "Define at least one recipe with two ingredients and one output.")
+            messagebox.showwarning("No valid recipes", "Define at least one recipe with an ingredient and an output.")
             return
         mapping_file = self._find_latest_mapping_file()
-        output_location = self.output_path or self.output_base
-        builder = RecipeBuilder(
-            workshop_root=self.workshop_path or Path.cwd(),
-            csv_path=self.csv_path or Path.cwd(),
-            game_root=self.game_dir,
-            mapping_json=mapping_file,
-            output_root=output_location,
-        )
-        try:
-            patch_root = builder.build_recipes(definitions)
-            messagebox.showinfo("Recipes Generated", f"Created {len(definitions)} recipes in:\n{patch_root}")
-            self._open_folder(patch_root)
-        except Exception as exc:
-            messagebox.showerror("Recipe Generation Failed", str(exc))
+        self._set_recipe_ui_state(running=True)
+        self._append_log(f"Starting recipe generation for {len(definitions)} recipe file(s)...")
+        self.status_label.config(text="Generating recipes...")
+        self.progress_bar.config(value=0)
+
+        def recipe_job() -> None:
+            try:
+                self._enqueue_log("Loading recipe ID availability and existing IDs...")
+                builder = RecipeBuilder(
+                    workshop_root=self.workshop_path or Path.cwd(),
+                    csv_path=self.csv_path or Path.cwd(),
+                    game_root=self.game_dir,
+                    mapping_json=mapping_file,
+                    output_root=output_location,
+                    recipes_csv_root=self.last_output_path,
+                    export_recipes_csv=self.export_recipes_csv_var.get(),
+                    imported_recipes_csv=self.recipes_csv_path,
+                    log_callback=self._enqueue_log,
+                    progress_callback=self._enqueue_progress,
+                )
+                patch_root = builder.build_recipes(definitions)
+                self.worker_queue.put(("recipes_finished", (str(patch_root), len(definitions))))
+            except Exception as exc:
+                self.worker_queue.put(("recipes_error", str(exc)))
+
+        threading.Thread(target=recipe_job, daemon=True).start()
+
+    def _set_recipe_ui_state(self, running: bool) -> None:
+        state = "disabled" if running else "normal"
+        for widget in [self.add_recipe_button, self.generate_recipes_button, self.export_recipes_csv_checkbox, self.import_recipes_csv_button]:
+            widget.state([state] if state == "disabled" else ["!disabled"])
+        if not running and self._get_recipe_output_root() is None:
+            self.generate_recipes_button.state(["disabled"])
 
     def _on_mods_tree_double_click(self, event: Any) -> None:
         item_id = self.mods_tree.identify_row(event.y)
@@ -1279,6 +1705,7 @@ class MainWindow(tk.Tk):
             self._set_ui_state(running=False)
             self.open_output_button.state(["!disabled"])
             self.last_output_path = Path(output_path)
+            self.generate_recipes_button.state(["!disabled"])
             messagebox.showinfo("Completed", f"Patch output folder: {output_path}")
             self._open_folder(self.last_output_path)
         elif kind == "error":
@@ -1286,6 +1713,19 @@ class MainWindow(tk.Tk):
             self.status_label.config(text="Error occurred")
             messagebox.showerror("Error", payload)
             self._set_ui_state(running=False)
+        elif kind == "recipes_finished":
+            patch_root, count = payload
+            self._append_log(f"Created {count} recipe file(s) in {patch_root}")
+            self.progress_bar.config(value=100)
+            self.status_label.config(text="Recipes generated")
+            self._set_recipe_ui_state(running=False)
+            messagebox.showinfo("Recipes Generated", f"Created {count} recipes in:\n{patch_root}")
+            self._open_folder(Path(patch_root))
+        elif kind == "recipes_error":
+            self._append_log(f"[ERROR] Recipe generation failed: {payload}")
+            self.status_label.config(text="Recipe generation failed")
+            self._set_recipe_ui_state(running=False)
+            messagebox.showerror("Recipe Generation Failed", payload)
 
     def on_open_output_folder(self) -> None:
         if self.last_output_path and self.last_output_path.exists():
