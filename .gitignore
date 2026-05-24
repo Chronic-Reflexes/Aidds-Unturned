@@ -1,2 +1,6 @@
 __pycache__/
 .gitignore
+Unturned-Datamining-linux-client-preview/
+unturned_guid_mapping.csv
+unturned_guid_mapping.json
+Scripts/

@@ -69,12 +69,34 @@ CHECKED = "[x]"
 NO_RESULTS_TEXT = "No results found"
 MAX_DROPDOWN_RESULTS = 250
 UI_SETTINGS_FILE = Path(__file__).resolve().parent / "ui_settings.json"
+WRENCH_EFFECT_GUID = "84347b13028340b8976033c08675d458"
+VANILLA_MAP_NAMES = [
+    "PEI",
+    "Washington",
+    "Yukon",
+    "Russia",
+    "Germany",
+    "Hawaii",
+    "Greece",
+    "France",
+    "Belgium",
+    "California",
+    "Carpat",
+    "Rio de Janeiro",
+    "Ireland",
+    "Monolith",
+    "A6 Polaris",
+    "Kuwait",
+    "Arid",
+    "Buak",
+    "Elver",
+]
 
 from .models import WorkshopMod
 from .parsers import DatAssetScanner
 from .workshop import WorkshopScanner
 from .worker import PatchWorker
-from .recipe_builder import RecipeBuilder
+from .recipe_builder import BLUEPRINT_CATEGORIES, WORKSTATION_TAGS, RecipeBuilder
 
 
 class Tooltip:
@@ -553,12 +575,16 @@ class RecipeRow:
         parent: ttk.Frame,
         option_values: List[str],
         option_map: Dict[str, int],
+        map_names: Optional[List[str]],
+        effect_options: Optional[List[Tuple[str, str, str]]],
         on_update: Callable[[], None],
         on_remove: Optional[Callable[[Any], None]] = None,
     ):
         self.parent = parent
         self.option_values = option_values
         self.option_map = option_map
+        self.map_names = map_names or list(VANILLA_MAP_NAMES)
+        self.effect_options = effect_options or [("Wrench", WRENCH_EFFECT_GUID, "Wrench")]
         self.on_update = on_update
         self.on_remove = on_remove
         self.container = tk.Frame(parent, background="black")
@@ -567,6 +593,13 @@ class RecipeRow:
         self.container.columnconfigure(0, weight=1)
         self.ingredients: List[IngredientWidget] = []
         self.name_var = tk.StringVar()
+        self.skill_level_var = tk.StringVar(value="0")
+        self.category_var = tk.StringVar(value="Auto")
+        self.workstation_var = tk.StringVar(value="None")
+        self.map_name_var = tk.StringVar()
+        self.state_transfer_var = tk.BooleanVar(value=False)
+        self.state_transfer_delete_attachments_var = tk.BooleanVar(value=False)
+        self.effect_var = tk.StringVar(value=self.effect_options[0][0])
         self.description = ""
         self.name_entry = ttk.Entry(self.frame, textvariable=self.name_var, width=20)
         self.name_entry.bind("<KeyRelease>", self._on_name_change)
@@ -574,6 +607,7 @@ class RecipeRow:
         self.result_picker = RecipeItemPicker(self.frame, option_values, self.on_update, allow_multi_select=False)
         self.add_button = ttk.Button(self.frame, text="+", width=2, command=self.add_component, style="Green.TButton")
         self.add_button.bind("<Button-3>", lambda _: self.remove_component())
+        self.options_button = ttk.Button(self.frame, text="...", width=3, command=self._show_options_menu)
         self.remove_button = tk.Button(
             self.frame,
             text="X",
@@ -594,6 +628,227 @@ class RecipeRow:
             self.name_var.set(cleaned)
             self.name_entry.icursor(tk.END)
         self.on_update()
+
+    def _show_options_menu(self) -> None:
+        menu = tk.Menu(self.frame, tearoff=False)
+        menu.add_command(label="Crafting level requirement", command=self._open_skill_level_dialog)
+        menu.add_command(label="Category", command=self._open_category_dialog)
+        menu.add_command(label="Nearby workstation", command=self._open_workstation_dialog)
+        menu.add_command(label="Restrict to Map", command=self._open_map_dialog)
+        menu.add_command(label="Sound effect", command=self._open_effect_dialog)
+        menu.add_checkbutton(
+            label="State transfer",
+            variable=self.state_transfer_var,
+            command=self.on_update,
+        )
+        menu.add_checkbutton(
+            label="Delete attachments on transfer",
+            variable=self.state_transfer_delete_attachments_var,
+            command=self.on_update,
+        )
+        x = self.options_button.winfo_rootx()
+        y = self.options_button.winfo_rooty() + self.options_button.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def _position_options_dialog(self, dialog: tk.Toplevel) -> None:
+        dialog.update_idletasks()
+        x = self.options_button.winfo_rootx()
+        y = self.options_button.winfo_rooty() + self.options_button.winfo_height() + 2
+        dialog.geometry(f"+{x}+{y}")
+
+    def _open_skill_level_dialog(self) -> None:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Crafting Level")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=10)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Crafting level requirement").grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 6))
+        level_var = tk.StringVar(value=self.skill_level_var.get() or "0")
+        level_entry = ttk.Entry(content, textvariable=level_var, width=8)
+        level_entry.grid(row=1, column=0, columnspan=2, sticky="w")
+
+        def clean_level() -> None:
+            cleaned = re.sub(r"\D+", "", level_var.get())[:1]
+            if cleaned:
+                cleaned = str(max(0, min(3, int(cleaned))))
+            if cleaned != level_var.get():
+                level_var.set(cleaned)
+                level_entry.icursor(tk.END)
+
+        def save() -> None:
+            clean_level()
+            self.skill_level_var.set(level_var.get() or "0")
+            dialog.grab_release()
+            dialog.destroy()
+            self.on_update()
+
+        def close() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        level_entry.bind("<KeyRelease>", lambda _: clean_level())
+        level_entry.bind("<Return>", lambda _: save())
+        ttk.Button(content, text="Ok", command=save).grid(row=2, column=0, padx=(0, 6), pady=(10, 0), sticky="e")
+        ttk.Button(content, text="Cancel", command=close).grid(row=2, column=1, pady=(10, 0), sticky="w")
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _: close())
+        self._position_options_dialog(dialog)
+        level_entry.focus_set()
+
+    def _open_category_dialog(self) -> None:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Recipe Category")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=10)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Category").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        category_var = tk.StringVar(value=self.category_var.get() or "Auto")
+        choices = ["Auto"] + list(BLUEPRINT_CATEGORIES.keys())
+        for index, label in enumerate(choices, start=1):
+            ttk.Radiobutton(content, text=label, value=label, variable=category_var).grid(row=index, column=0, sticky="w")
+
+        def save() -> None:
+            self.category_var.set(category_var.get() or "Auto")
+            dialog.grab_release()
+            dialog.destroy()
+            self.on_update()
+
+        def close() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        button_row = len(choices) + 1
+        ttk.Button(content, text="Ok", command=save).grid(row=button_row, column=0, pady=(10, 0), sticky="e")
+        ttk.Button(content, text="Cancel", command=close).grid(row=button_row, column=1, padx=(6, 0), pady=(10, 0), sticky="w")
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _: close())
+        self._position_options_dialog(dialog)
+
+    def _open_workstation_dialog(self) -> None:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Nearby Workstation")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=10)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Nearby workstation requirement").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        workstation_var = tk.StringVar(value=self.workstation_var.get() or "None")
+        choices = ["None"] + list(WORKSTATION_TAGS.keys())
+        for index, label in enumerate(choices, start=1):
+            ttk.Radiobutton(content, text=label, value=label, variable=workstation_var).grid(row=index, column=0, sticky="w")
+
+        def save() -> None:
+            self.workstation_var.set(workstation_var.get() or "None")
+            dialog.grab_release()
+            dialog.destroy()
+            self.on_update()
+
+        def close() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        button_row = len(choices) + 1
+        ttk.Button(content, text="Ok", command=save).grid(row=button_row, column=0, pady=(10, 0), sticky="e")
+        ttk.Button(content, text="Cancel", command=close).grid(row=button_row, column=1, padx=(6, 0), pady=(10, 0), sticky="w")
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _: close())
+        self._position_options_dialog(dialog)
+
+    def _open_map_dialog(self) -> None:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Restrict to Map")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=10)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Map").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        map_var = tk.StringVar(value=self.map_name_var.get() or "Any")
+        choices = ["Any"] + self.map_names
+        listbox = tk.Listbox(content, height=min(14, len(choices)), exportselection=False, width=32)
+        listbox.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        for choice in choices:
+            listbox.insert(tk.END, choice)
+        try:
+            selected_index = choices.index(map_var.get())
+        except ValueError:
+            selected_index = 0
+        listbox.selection_set(selected_index)
+        listbox.see(selected_index)
+
+        def save() -> None:
+            selection = listbox.curselection()
+            value = choices[selection[0]] if selection else "Any"
+            self.map_name_var.set("" if value == "Any" else value)
+            dialog.grab_release()
+            dialog.destroy()
+            self.on_update()
+
+        def close() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        listbox.bind("<Double-Button-1>", lambda _: save())
+        ttk.Button(content, text="Ok", command=save).grid(row=2, column=0, padx=(0, 6), pady=(10, 0), sticky="e")
+        ttk.Button(content, text="Cancel", command=close).grid(row=2, column=1, pady=(10, 0), sticky="w")
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _: close())
+        self._position_options_dialog(dialog)
+        listbox.focus_set()
+
+    def _open_effect_dialog(self) -> None:
+        dialog = tk.Toplevel(self.frame)
+        dialog.title("Blueprint Sound Effect")
+        dialog.transient(self.frame.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        content = ttk.Frame(dialog, padding=10)
+        content.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(content, text="Effect").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        choices = [label for label, _, _ in self.effect_options]
+        listbox = tk.Listbox(content, height=min(16, len(choices)), exportselection=False, width=44)
+        listbox.grid(row=1, column=0, columnspan=2, sticky="nsew")
+        for choice in choices:
+            listbox.insert(tk.END, choice)
+        try:
+            selected_index = choices.index(self.effect_var.get())
+        except ValueError:
+            selected_index = 0
+        listbox.selection_set(selected_index)
+        listbox.see(selected_index)
+
+        def save() -> None:
+            selection = listbox.curselection()
+            if selection:
+                self.effect_var.set(choices[selection[0]])
+            dialog.grab_release()
+            dialog.destroy()
+            self.on_update()
+
+        def close() -> None:
+            dialog.grab_release()
+            dialog.destroy()
+
+        listbox.bind("<Double-Button-1>", lambda _: save())
+        ttk.Button(content, text="Ok", command=save).grid(row=2, column=0, padx=(0, 6), pady=(10, 0), sticky="e")
+        ttk.Button(content, text="Cancel", command=close).grid(row=2, column=1, pady=(10, 0), sticky="w")
+        dialog.protocol("WM_DELETE_WINDOW", close)
+        dialog.bind("<Escape>", lambda _: close())
+        self._position_options_dialog(dialog)
+        listbox.focus_set()
 
     def _on_description_menu(self, event: tk.Event) -> str:
         dialog = tk.Toplevel(self.frame)
@@ -662,16 +917,32 @@ class RecipeRow:
         self.equals_label.grid(row=0, column=max_cols + 1, padx=(0, 4), sticky="nw")
         self.result_picker.grid(row=0, column=max_cols + 2, padx=(0, 4), sticky="new")
         self.frame.columnconfigure(max_cols + 2, weight=1)
-        self.remove_button.grid(row=0, column=max_cols + 3, padx=(4, 0), sticky="ne")
+        self.options_button.grid(row=0, column=max_cols + 3, padx=(4, 0), sticky="ne")
+        self.remove_button.grid(row=0, column=max_cols + 4, padx=(4, 0), sticky="ne")
 
         next_index = len(self.ingredients)
         last_row = next_index // max_cols
         last_col = (next_index % max_cols) + 1
         self.add_button.grid(row=last_row, column=last_col, padx=(0, 4), sticky="nw")
 
-    def update_options(self, option_values: List[str], option_map: Dict[str, int]) -> None:
+    def update_options(
+        self,
+        option_values: List[str],
+        option_map: Dict[str, int],
+        map_names: Optional[List[str]] = None,
+        effect_options: Optional[List[Tuple[str, str, str]]] = None,
+    ) -> None:
         self.option_values = option_values
         self.option_map = option_map
+        if map_names is not None:
+            self.map_names = map_names
+            if self.map_name_var.get() and self.map_name_var.get() not in self.map_names:
+                self.map_name_var.set("")
+        if effect_options is not None:
+            self.effect_options = effect_options
+            labels = [label for label, _, _ in self.effect_options]
+            if self.effect_var.get() not in labels:
+                self.effect_var.set(labels[0] if labels else "Wrench")
         for ingredient in self.ingredients:
             ingredient.update_options(option_values)
         self.result_picker.update_options(option_values)
@@ -687,6 +958,93 @@ class RecipeRow:
 
     def get_description(self) -> str:
         return self.description
+
+    def set_salvage(self, is_salvage: bool) -> None:
+        if is_salvage:
+            self.category_var.set("Salvage")
+
+    def is_salvage(self) -> bool:
+        return False
+
+    def set_skill_level(self, value: object) -> None:
+        text = re.sub(r"\D+", "", str(value))[:1]
+        if text:
+            text = str(max(0, min(3, int(text))))
+        self.skill_level_var.set(text or "0")
+
+    def get_skill_level(self) -> int:
+        text = re.sub(r"\D+", "", self.skill_level_var.get())[:1]
+        if not text:
+            return 0
+        return max(0, min(3, int(text)))
+
+    def set_category_label(self, value: object) -> None:
+        label = str(value or "").strip()
+        self.category_var.set(label if label == "Auto" or label in BLUEPRINT_CATEGORIES else "Auto")
+
+    def get_category_label(self) -> str:
+        label = self.category_var.get().strip()
+        return "" if label == "Auto" else label
+
+    def get_category_guid(self) -> str:
+        return BLUEPRINT_CATEGORIES.get(self.get_category_label(), "")
+
+    def set_workstation_label(self, value: object) -> None:
+        label = str(value or "").strip()
+        self.workstation_var.set(label if label == "None" or label in WORKSTATION_TAGS else "None")
+
+    def get_workstation_label(self) -> str:
+        label = self.workstation_var.get().strip()
+        return "" if label == "None" else label
+
+    def get_workstation_guid(self) -> str:
+        return WORKSTATION_TAGS.get(self.get_workstation_label(), "")
+
+    def set_map_name(self, value: object) -> None:
+        map_name = " ".join(str(value or "").split()).strip()
+        self.map_name_var.set(map_name if map_name in self.map_names else "")
+
+    def get_map_name(self) -> str:
+        return self.map_name_var.get().strip()
+
+    def set_state_transfer(self, value: object) -> None:
+        self.state_transfer_var.set(str(value).strip().lower() in {"1", "true", "yes", "on"})
+
+    def get_state_transfer(self) -> bool:
+        return self.state_transfer_var.get()
+
+    def set_state_transfer_delete_attachments(self, value: object) -> None:
+        self.state_transfer_delete_attachments_var.set(str(value).strip().lower() in {"1", "true", "yes", "on"})
+
+    def get_state_transfer_delete_attachments(self) -> bool:
+        return self.state_transfer_delete_attachments_var.get()
+
+    def set_effect(self, label: object = "", guid: object = "") -> None:
+        guid_text = str(guid or "").strip().strip('"').lower()
+        label_text = str(label or "").strip()
+        for option_label, option_guid, _ in self.effect_options:
+            if guid_text and option_guid == guid_text:
+                self.effect_var.set(option_label)
+                return
+            if label_text and option_label == label_text:
+                self.effect_var.set(option_label)
+                return
+        if self.effect_options:
+            self.effect_var.set(self.effect_options[0][0])
+
+    def get_effect_guid(self) -> str:
+        selected = self.effect_var.get()
+        for label, guid, _ in self.effect_options:
+            if label == selected:
+                return guid
+        return WRENCH_EFFECT_GUID
+
+    def get_effect_label(self) -> str:
+        selected = self.effect_var.get()
+        for label, _, name in self.effect_options:
+            if label == selected:
+                return name
+        return "Wrench"
 
     def get_ingredient_label_groups(self) -> List[List[str]]:
         return [labels for ingredient in self.ingredients if (labels := ingredient.get_labels())]
@@ -710,9 +1068,26 @@ class RecipeRow:
         output_label: str,
         output_amount: int,
         description: str = "",
+        is_salvage: bool = False,
+        skill_level: object = 0,
+        category_label: object = "",
+        workstation_label: object = "",
+        map_name: object = "",
+        state_transfer: object = False,
+        state_transfer_delete_attachments: object = False,
+        effect_label: object = "",
+        effect_guid: object = "",
     ) -> None:
         self.set_recipe_name(name)
         self.set_description(description)
+        self.set_salvage(is_salvage)
+        self.set_skill_level(skill_level)
+        self.set_category_label(category_label)
+        self.set_workstation_label(workstation_label)
+        self.set_map_name(map_name)
+        self.set_state_transfer(state_transfer)
+        self.set_state_transfer_delete_attachments(state_transfer_delete_attachments)
+        self.set_effect(effect_label, effect_guid)
         while len(self.ingredients) < len(ingredient_labels):
             self._add_ingredient()
         self._layout()
@@ -758,6 +1133,8 @@ class MainWindow(tk.Tk):
         self.last_output_path: Path | None = None
         self.scanner = WorkshopScanner()
         self._recipe_item_cache: Dict[str, List[Tuple[str, int]]] = {}
+        self._recipe_item_file_cache: Dict[str, Dict[str, str]] = {}
+        self._recipe_item_guid_cache: Dict[str, Dict[str, str]] = {}
         self._recipe_refresh_after_id: Optional[str] = None
         self.ui_settings = self._load_ui_settings()
         self._showing_recipe_reminder = False
@@ -892,6 +1269,10 @@ class MainWindow(tk.Tk):
         self.recipe_rows: List[RecipeRow] = []
         self.recipe_items: List[str] = []
         self.recipe_item_map: Dict[str, int] = {}
+        self.recipe_item_file_map: Dict[str, str] = {}
+        self.recipe_item_guid_map: Dict[str, str] = {}
+        self.recipe_map_names: List[str] = list(VANILLA_MAP_NAMES)
+        self.recipe_effect_options: List[Tuple[str, str, str]] = self._load_effect_options()
         self.export_recipes_csv_var = tk.BooleanVar(value=False)
         self.recipes_csv_path: Optional[Path] = None
 
@@ -1027,6 +1408,12 @@ class MainWindow(tk.Tk):
             if str(label) in self.recipe_item_map
         ]
 
+    def _label_for_guid(self, values: Dict[str, str], guid: str) -> str:
+        for label, value in values.items():
+            if value == guid:
+                return label
+        return ""
+
     def _import_custom_recipes_from_csv(self, path: Path) -> int:
         import csv
 
@@ -1058,12 +1445,50 @@ class MainWindow(tk.Tk):
                     output_amount = int(output_amount_text) if output_amount_text.isdigit() else 1
                     name = (record.get("CustomRecipeName") or record.get("Name") or f"ImportedRecipe{len(self.recipe_rows) + 1}").strip()
                     description = (record.get("Description") or "").strip()
-
+                    is_salvage = (record.get("RecipeType") or "").strip().lower() == "salvage"
+                    skill_level_text = (record.get("SkillLevel") or "0").strip()
+                    skill_level = int(skill_level_text) if skill_level_text.isdigit() else 0
+                    skill_level = max(0, min(3, skill_level))
+                    category_label = (record.get("Category") or "").strip()
+                    if category_label == "Auto":
+                        category_label = ""
+                    if category_label not in BLUEPRINT_CATEGORIES:
+                        category_guid = (record.get("CategoryGUID") or "").strip()
+                        category_label = self._label_for_guid(BLUEPRINT_CATEGORIES, category_guid)
+                    if not category_label and is_salvage:
+                        category_label = "Salvage"
+                    if category_label not in BLUEPRINT_CATEGORIES:
+                        category_label = ""
+                    workstation_label = (record.get("Workstation") or "").strip()
+                    if workstation_label == "None":
+                        workstation_label = ""
+                    if workstation_label not in WORKSTATION_TAGS:
+                        workstation_guid = (record.get("WorkstationGUID") or "").strip()
+                        workstation_label = self._label_for_guid(WORKSTATION_TAGS, workstation_guid)
+                    if workstation_label not in WORKSTATION_TAGS:
+                        workstation_label = ""
+                    map_name = (record.get("Map") or "").strip()
+                    if map_name not in self.recipe_map_names:
+                        map_name = ""
+                    state_transfer = (record.get("StateTransfer") or "").strip().lower() in {"1", "true", "yes", "on"}
+                    state_transfer_delete_attachments = (
+                        record.get("StateTransferDeleteAttachments") or ""
+                    ).strip().lower() in {"1", "true", "yes", "on"}
+                    effect_label = (record.get("Effect") or "Wrench").strip()
+                    effect_guid = (record.get("EffectGUID") or WRENCH_EFFECT_GUID).strip()
                     group_key = (
                         name,
                         output_label,
                         str(output_amount),
                         description,
+                        str(skill_level),
+                        category_label,
+                        workstation_label,
+                        map_name,
+                        str(state_transfer),
+                        str(state_transfer_delete_attachments),
+                        effect_label,
+                        effect_guid,
                         json.dumps(ingredient_amounts),
                         json.dumps(tool_indices),
                         len(ingredient_label_groups),
@@ -1078,6 +1503,15 @@ class MainWindow(tk.Tk):
                             "output_label": output_label,
                             "output_amount": output_amount,
                             "description": description,
+                            "is_salvage": False,
+                            "skill_level": skill_level,
+                            "category_label": category_label,
+                            "workstation_label": workstation_label,
+                            "map_name": map_name,
+                            "state_transfer": state_transfer,
+                            "state_transfer_delete_attachments": state_transfer_delete_attachments,
+                            "effect_label": effect_label,
+                            "effect_guid": effect_guid,
                         }
                         continue
 
@@ -1093,6 +1527,8 @@ class MainWindow(tk.Tk):
                         self.recipe_inner_frame,
                         self.recipe_items,
                         self.recipe_item_map,
+                        self.recipe_map_names,
+                        self.recipe_effect_options,
                         self._update_recipe_status,
                         self._remove_recipe_row,
                     )
@@ -1105,6 +1541,15 @@ class MainWindow(tk.Tk):
                         grouped["output_label"],
                         grouped["output_amount"],
                         grouped["description"],
+                        grouped["is_salvage"],
+                        grouped["skill_level"],
+                        grouped["category_label"],
+                        grouped["workstation_label"],
+                        grouped["map_name"],
+                        grouped["state_transfer"],
+                        grouped["state_transfer_delete_attachments"],
+                        grouped["effect_label"],
+                        grouped["effect_guid"],
                     )
                     row.put_in_parent(len(self.recipe_rows) - 1)
                     imported += 1
@@ -1501,6 +1946,8 @@ class MainWindow(tk.Tk):
             cache_key = str(mod.path.resolve())
             if cache_key not in self._recipe_item_cache:
                 mod_items: List[Tuple[str, int]] = []
+                mod_item_files: Dict[str, str] = {}
+                mod_item_guids: Dict[str, str] = {}
                 scanner = DatAssetScanner(mod.path)
                 scanner.scan_all_files()
                 for blocks in scanner.asset_files.values():
@@ -1509,8 +1956,14 @@ class MainWindow(tk.Tk):
                             continue
                         label_candidate = block.name or block.file_path.stem or block.file_path.parent.name or block.asset_type
                         label_base = self._format_recipe_label(label_candidate)
-                        mod_items.append((f"{label_base} ({block.legacy_id})", block.legacy_id))
+                        label = f"{label_base} ({block.legacy_id})"
+                        mod_items.append((label, block.legacy_id))
+                        mod_item_files[label] = str(block.file_path)
+                        if block.guid:
+                            mod_item_guids[label] = block.guid.strip().strip('"')
                 self._recipe_item_cache[cache_key] = mod_items
+                self._recipe_item_file_cache[cache_key] = mod_item_files
+                self._recipe_item_guid_cache[cache_key] = mod_item_guids
             for label, legacy_id in self._recipe_item_cache[cache_key]:
                 if (label, legacy_id) in seen:
                     continue
@@ -1518,6 +1971,82 @@ class MainWindow(tk.Tk):
                 items.append((label, legacy_id))
         items.sort(key=lambda item: item[0].lower())
         return items
+
+    def _get_selected_map_names(self) -> List[str]:
+        names = set(VANILLA_MAP_NAMES)
+        for mod in self.mods:
+            if not mod.selected or not mod.path:
+                continue
+            for candidate in self._discover_map_folders(mod.path):
+                names.add(candidate.name)
+        return sorted(names, key=lambda name: name.lower())
+
+    def _discover_map_folders(self, root: Path) -> List[Path]:
+        maps: List[Path] = []
+        try:
+            candidates = [root / "Maps"] if (root / "Maps").exists() else [root]
+            for base in candidates:
+                for child in base.iterdir():
+                    if not child.is_dir():
+                        continue
+                    if (
+                        (child / "Level.dat").exists()
+                        or (child / "Config.json").exists()
+                        or (child / "Spawns").is_dir()
+                        or (child / "Terrain").is_dir()
+                    ):
+                        maps.append(child)
+        except OSError:
+            return maps
+        return maps
+
+    def _load_effect_options(self) -> List[Tuple[str, str, str]]:
+        roots: List[Path] = []
+        datamine_effects = Path.cwd() / "Unturned-Datamining-linux-client-preview" / "Bundles" / "Effects"
+        if datamine_effects.exists():
+            roots.append(datamine_effects)
+        if self.game_dir:
+            game_effects = self.game_dir / "Bundles" / "Effects"
+            if game_effects.exists():
+                roots.append(game_effects)
+        for mod in self.mods:
+            if mod.selected and mod.path:
+                effects_root = mod.path / "Effects"
+                if effects_root.exists():
+                    roots.append(effects_root)
+
+        effects: Dict[str, Tuple[str, str, str]] = {}
+        effects[WRENCH_EFFECT_GUID] = ("Wrench", WRENCH_EFFECT_GUID, "Wrench")
+        guid_pattern = re.compile(r'^\s*"?GUID"?\s+"?([0-9A-Fa-f]{32})"?\s*$')
+        for root in roots:
+            try:
+                files = list(root.rglob("*.dat")) + list(root.rglob("*.asset"))
+            except OSError:
+                continue
+            for path in files:
+                try:
+                    lines = path.read_text(encoding="utf-8-sig", errors="replace").splitlines()
+                except OSError:
+                    continue
+                guid = ""
+                for line in lines[:12]:
+                    match = guid_pattern.match(line)
+                    if match:
+                        guid = match.group(1).lower()
+                        break
+                if not guid or guid in effects:
+                    continue
+                name = path.parent.name if path.stem.lower() in {"asset", "effect"} else path.stem
+                group = ""
+                try:
+                    relative = path.relative_to(root)
+                    group = relative.parts[0] if len(relative.parts) > 1 else ""
+                except ValueError:
+                    pass
+                label = f"{name} ({group})" if group else name
+                label = f"{label} - {guid[:8]}"
+                effects[guid] = (label, guid, name)
+        return sorted(effects.values(), key=lambda row: (row[2].lower() != "wrench", row[2].lower(), row[1]))
 
     def _schedule_recipe_item_refresh(self) -> None:
         if self._recipe_refresh_after_id is not None:
@@ -1529,8 +2058,20 @@ class MainWindow(tk.Tk):
         item_entries = self._get_selected_recipe_items()
         self.recipe_items = [label for label, _ in item_entries]
         self.recipe_item_map = {label: legacy_id for label, legacy_id in item_entries}
+        self.recipe_item_file_map = {}
+        for files_by_label in self._recipe_item_file_cache.values():
+            for label, file_path in files_by_label.items():
+                if label in self.recipe_item_map and label not in self.recipe_item_file_map:
+                    self.recipe_item_file_map[label] = file_path
+        self.recipe_item_guid_map = {}
+        for guids_by_label in self._recipe_item_guid_cache.values():
+            for label, guid in guids_by_label.items():
+                if label in self.recipe_item_map and label not in self.recipe_item_guid_map:
+                    self.recipe_item_guid_map[label] = guid
+        self.recipe_map_names = self._get_selected_map_names()
+        self.recipe_effect_options = self._load_effect_options()
         for row in getattr(self, "recipe_rows", []):
-            row.update_options(self.recipe_items, self.recipe_item_map)
+            row.update_options(self.recipe_items, self.recipe_item_map, self.recipe_map_names, self.recipe_effect_options)
         self.recipe_status_label.config(text=f"{len(self.recipe_rows)} recipes, {len(self.recipe_items)} selectable items")
 
     def on_add_recipe(self) -> None:
@@ -1544,6 +2085,8 @@ class MainWindow(tk.Tk):
             self.recipe_inner_frame,
             self.recipe_items,
             self.recipe_item_map,
+            self.recipe_map_names,
+            self.recipe_effect_options,
             self._update_recipe_status,
             self._remove_recipe_row,
         )
@@ -1581,6 +2124,13 @@ class MainWindow(tk.Tk):
                 return sorted(candidates)[-1]
         return None
 
+    def _get_patch_report_root(self) -> Optional[Path]:
+        if not self.last_output_path or not self.last_output_path.exists():
+            return None
+        if self.last_output_path.name.lower() == "compatibilitypatch":
+            return self.last_output_path.parent
+        return self.last_output_path
+
     def _get_recipe_output_root(self) -> Optional[Path]:
         if not self.last_output_path or not self.last_output_path.exists():
             return None
@@ -1589,6 +2139,9 @@ class MainWindow(tk.Tk):
             compatibility_patch = patch_root / "CompatibilityPatch"
             if compatibility_patch.exists():
                 patch_root = compatibility_patch
+
+        if (patch_root / "Items").exists():
+            return patch_root
 
         content_dirs = [path for path in patch_root.iterdir() if path.is_dir()]
         if not content_dirs:
@@ -1621,18 +2174,40 @@ class MainWindow(tk.Tk):
                 ]
                 if len(ingredient_ids) < 1:
                     continue
+                recipe_type = "tool" if tool_indices else "use"
                 definitions.append(
                     {
                         "ingredients": ingredient_ids,
                         "result": self.recipe_item_map[output_label],
+                        "recipe_type": recipe_type,
                         "tool_indices": tool_indices,
                         "ingredient_amounts": ingredient_amounts,
                         "ingredient_labels": list(label_combination),
                         "ingredient_label_groups": ingredient_label_groups,
+                        "ingredient_guids": [
+                            self.recipe_item_guid_map.get(label, "")
+                            for label in label_combination
+                        ],
+                        "ingredient_source_paths": [
+                            self.recipe_item_file_map.get(label, "")
+                            for label in label_combination
+                        ],
+                        "output_guid": self.recipe_item_guid_map.get(output_label, ""),
+                        "output_source_path": self.recipe_item_file_map.get(output_label, ""),
                         "output_amount": row.get_output_amount(),
                         "output_label": output_label,
                         "recipe_name": base_name,
                         "description": row.get_description(),
+                        "skill_level": row.get_skill_level(),
+                        "category_label": row.get_category_label(),
+                        "category_guid": row.get_category_guid(),
+                        "workstation_label": row.get_workstation_label(),
+                        "workstation_guid": row.get_workstation_guid(),
+                        "map_name": row.get_map_name(),
+                        "state_transfer": row.get_state_transfer(),
+                        "state_transfer_delete_attachments": row.get_state_transfer_delete_attachments(),
+                        "effect_label": row.get_effect_label(),
+                        "effect_guid": row.get_effect_guid(),
                         "patch_name": base_name if len(label_combinations) == 1 else f"{base_name}_{combination_index}",
                     }
                 )
@@ -1652,6 +2227,7 @@ class MainWindow(tk.Tk):
             messagebox.showwarning("No valid recipes", "Define at least one recipe with an ingredient and an output.")
             return
         mapping_file = self._find_latest_mapping_file()
+        recipes_csv_root = self._get_patch_report_root()
         self._set_recipe_ui_state(running=True)
         self._append_log(f"Starting recipe generation for {len(definitions)} recipe file(s)...")
         self.status_label.config(text="Generating recipes...")
@@ -1659,14 +2235,14 @@ class MainWindow(tk.Tk):
 
         def recipe_job() -> None:
             try:
-                self._enqueue_log("Loading recipe ID availability and existing IDs...")
+                self._enqueue_log("Preparing CraftingAsset recipe generation...")
                 builder = RecipeBuilder(
                     workshop_root=self.workshop_path or Path.cwd(),
                     csv_path=self.csv_path or Path.cwd(),
                     game_root=self.game_dir,
                     mapping_json=mapping_file,
                     output_root=output_location,
-                    recipes_csv_root=self.last_output_path,
+                    recipes_csv_root=recipes_csv_root,
                     export_recipes_csv=self.export_recipes_csv_var.get(),
                     imported_recipes_csv=self.recipes_csv_path,
                     log_callback=self._enqueue_log,
